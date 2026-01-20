@@ -11,6 +11,7 @@ from stock_screener import render_stock_screener_tab
 from powerbi import render_powerbi_tab
 from stop_loss_analysis import render_stop_loss_tab
 from earnings_analysis import render_earnings_analysis_tab
+from ai_assistant import render_ai_assistant_tab
 
 # ------------------------------------
 # PAGE SETUP
@@ -48,11 +49,12 @@ except Exception as e:
 # ------------------------------------
 # TABS
 # ------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Stock Screener", 
     "PowerBI", 
     "Stop Loss Analysis", 
-    "Earnings Analysis"
+    "Earnings Analysis",
+    "AI Assistant"
 ])
 
 # Render each tab
@@ -67,6 +69,9 @@ with tab3:
 
 with tab4:
     render_earnings_analysis_tab(returns_df, filter_stats)
+
+with tab5:
+    render_ai_assistant_tab()
 
 # FOOTER
 st.markdown("---")
