@@ -34,6 +34,58 @@ def format_value(value, decimals=2):
         return str(value)
 
 
+def has_earnings_happened(earnings_date, earnings_timing):
+    """
+    Determine if earnings have already happened based on date and timing.
+    
+    Rules:
+    - BMO (Before Market Open): Reported after 4pm the day BEFORE earnings
+    - AMC (After Market Close): Reported after 4pm ON the earnings day
+    - No timing specified: Treat as AMC (conservative - wait until 4pm on earnings day)
+    
+    Args:
+        earnings_date: datetime or date object of the earnings date
+        earnings_timing: string like 'BMO', 'AMC', or empty/None
+    
+    Returns:
+        bool: True if earnings have happened, False if upcoming
+    """
+    if earnings_date is None:
+        return False
+    
+    now = datetime.now()
+    today = now.date()
+    current_hour = now.hour
+    market_close_hour = 16  # 4pm
+    
+    # Convert to date if datetime
+    if hasattr(earnings_date, 'date'):
+        earn_date = earnings_date.date()
+    else:
+        earn_date = earnings_date
+    
+    # Normalize timing
+    timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
+    
+    if "BMO" in timing:
+        # BMO: Earnings happen before market open on earnings_date
+        # So it's "reported" after 4pm the day BEFORE earnings_date
+        cutoff_date = earn_date - timedelta(days=1)
+        if today > cutoff_date:
+            return True
+        elif today == cutoff_date and current_hour >= market_close_hour:
+            return True
+        return False
+    else:
+        # AMC or unknown: Earnings happen after market close on earnings_date
+        # So it's "reported" after 4pm ON the earnings_date
+        if today > earn_date:
+            return True
+        elif today == earn_date and current_hour >= market_close_hour:
+            return True
+        return False
+
+
 def render_stock_screener_tab(raw_returns_df):
     """Render the Stock Screener tab."""
     
@@ -50,29 +102,37 @@ def render_stock_screener_tab(raw_returns_df):
             tracked_tickers = set(raw_returns_df['Ticker'].unique())
         
         # Build the reported earnings rows
-        reported_rows = []
-        reported_tickers = set()
+        tracked_rows = []
+        tracked_tickers_this_week = set()
         if not this_week_df.empty:
             for _, row in this_week_df.iterrows():
                 ticker = row.get('Ticker', '')
-                reported_tickers.add(ticker)
+                tracked_tickers_this_week.add(ticker)
                 
-                # Format earnings date
-                earnings_str = 'N/A'
+                # Get earnings date and timing
+                earnings_date = None
+                timing = row.get('Earnings Timing', '')
                 if pd.notna(row.get('Earnings Date')):
-                    earnings_str = pd.to_datetime(row.get('Earnings Date')).strftime('%b %d')
-                    timing = row.get('Earnings Timing', '')
+                    earnings_date = pd.to_datetime(row.get('Earnings Date'))
+                
+                # Format earnings date string
+                earnings_str = 'N/A'
+                if earnings_date is not None:
+                    earnings_str = earnings_date.strftime('%b %d')
                     if pd.notna(timing) and timing:
                         earnings_str += ' ' + str(timing).strip()
                 
-                reported_rows.append({
+                # Determine status based on whether earnings have actually happened
+                status = "Reported" if has_earnings_happened(earnings_date, timing) else "Upcoming"
+                
+                tracked_rows.append({
                     "Ticker": ticker,
                     "Earnings": earnings_str,
                     "Price": format_value(row.get('Price')),
                     "P/E": format_value(row.get('P/E')),
                     "Beta": format_value(row.get('Beta')),
                     "Market Cap": format_market_cap(row.get('Market Cap')),
-                    "Status": "Reported"
+                    "Status": status
                 })
         
         # Status text for progress
@@ -95,7 +155,7 @@ def render_stock_screener_tab(raw_returns_df):
         # Check earnings dates
         status_text.text(f"{len(barchart_passed)} passed Barchart. Checking dates...")
         
-        upcoming_rows = []
+        new_rows = []
         skipped = []
         today = datetime.today().date()
         
@@ -103,8 +163,9 @@ def render_stock_screener_tab(raw_returns_df):
             data = get_finviz_data(t)
             date_info = get_date_check(t)
             
-            # Parse the earnings date from Finviz
+            # Parse the earnings date and timing from Finviz
             earnings_date = None
+            earnings_timing = ""
             earnings_str = data.get("Earnings", "")
             if earnings_str and earnings_str != "N/A":
                 try:
@@ -112,6 +173,9 @@ def render_stock_screener_tab(raw_returns_df):
                     if len(parts) >= 2:
                         month_day = f"{parts[0]} {parts[1]}"
                         earnings_date = datetime.strptime(f"{month_day} {today.year}", "%b %d %Y").date()
+                        # Check for BMO/AMC in the string
+                        if len(parts) >= 3:
+                            earnings_timing = parts[2].upper()
                 except:
                     pass
             
@@ -122,11 +186,11 @@ def render_stock_screener_tab(raw_returns_df):
                 skip_reason = "DATE PASSED"
             elif earnings_date and earnings_date < today and t not in tracked_tickers:
                 skip_reason = "MISSED (earnings passed, not in tracker)"
-            elif t in reported_tickers:
-                skip_reason = "Already reported"
+            elif t in tracked_tickers_this_week:
+                skip_reason = "Already in tracker"
             
             if skip_reason:
-                if skip_reason not in ["Already reported"]:
+                if skip_reason not in ["Already in tracker"]:
                     skipped.append({
                         "Ticker": t,
                         "Earnings": earnings_str,
@@ -136,14 +200,17 @@ def render_stock_screener_tab(raw_returns_df):
                 # Format market cap from Finviz (comes as string like "1.08B")
                 market_cap = data.get("Market Cap", "N/A")
                 
-                upcoming_rows.append({
+                # Determine status based on whether earnings have actually happened
+                status = "Reported" if has_earnings_happened(earnings_date, earnings_timing) else "Upcoming"
+                
+                new_rows.append({
                     "Ticker": t,
                     "Earnings": earnings_str,
                     "Price": data.get("Price", "N/A"),
                     "P/E": data.get("P/E", "N/A"),
                     "Beta": data.get("Beta", "N/A"),
                     "Market Cap": market_cap,
-                    "Status": "Upcoming"
+                    "Status": status
                 })
             
             progress.progress(0.5 + (i + 1) / len(barchart_passed) * 0.5)
@@ -152,8 +219,8 @@ def render_stock_screener_tab(raw_returns_df):
         progress.empty()
         status_text.empty()
         
-        # Combine reported + upcoming
-        all_rows = reported_rows + upcoming_rows
+        # Combine tracked + new (from Finviz scan)
+        all_rows = tracked_rows + new_rows
         
         # Sort by earnings date
         all_rows = sorted(all_rows, key=earnings_sort_key)
