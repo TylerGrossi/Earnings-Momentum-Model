@@ -44,12 +44,11 @@ HEADERS = {
 # ------------------------------------
 # MODEL CONFIGURATION
 # ------------------------------------
-# Fallback chain - if one model hits rate limit, try the next
-MODEL_FALLBACK_CHAIN = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite", 
-    "gemini-3-flash",
-]
+# Available models - only ones that work with the API
+AVAILABLE_MODELS = {
+    "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
+}
 
 
 # ------------------------------------
@@ -678,7 +677,7 @@ def scan_live_signals() -> str:
                 
                 result += f"**{ticker}**\n"
                 result += f"- Earnings: {data['Earnings']}\n"
-                result += f"- Price: {data['Price']}\n"
+                result += f"- Price: ${data['Price']}\n"
                 result += f"- Market Cap: {data['Market Cap']}\n\n"
                 
             except:
@@ -1109,12 +1108,14 @@ Examples:
 - "What's the win rate?" -> TOOL_CALL: get_strategy_performance()
 - "Test with 15% stop loss" -> TOOL_CALL: run_backtest(-15, 5)
 
-RESPONSE GUIDELINES:
+RESPONSE FORMATTING RULES:
 - Be conversational and explain the data in plain English
 - For historical data, use past tense
 - For live scanner results, explain these are current opportunities
-- Format numbers cleanly
-- If you're unsure what tool to use, ask clarifying questions
+- Format numbers cleanly with proper spacing
+- DO NOT use asterisks (*) for emphasis in your response - use plain text instead
+- When listing stock details, format clearly: "GE: Price $325.12, Market Cap $342.94B, Earnings Jan 22 BMO"
+- Keep responses concise and readable
 """
 
 
@@ -1139,11 +1140,17 @@ def execute_tool_call(tool_call: str) -> str:
             return get_risk_metrics()
         elif tool_name == 'analyze_by_filter':
             # Parse two arguments: filter_type, filter_value
-            args = [a.strip().strip('"').strip("'") for a in args_str.split(',', 1)]
-            if len(args) >= 2:
-                return analyze_by_filter(args[0], args[1])
+            # Handle various formats: (market_cap, above 100B) or ("market_cap", "above 100B")
+            args_str_clean = args_str.strip()
+            
+            # Split on first comma only
+            if ',' in args_str_clean:
+                parts = args_str_clean.split(',', 1)
+                filter_type = parts[0].strip().strip('"').strip("'").lower()
+                filter_value = parts[1].strip().strip('"').strip("'")
+                return analyze_by_filter(filter_type, filter_value)
             else:
-                return "analyze_by_filter requires two arguments: filter_type and filter_value"
+                return "analyze_by_filter requires two arguments: filter_type and filter_value. Example: analyze_by_filter(market_cap, above 100B)"
         elif tool_name == 'get_stock_details':
             ticker = args_str.strip().strip('"').strip("'")
             return get_stock_details(ticker)
@@ -1166,7 +1173,7 @@ def execute_tool_call(tool_call: str) -> str:
         return f"Error executing tool: {str(e)}"
 
 
-def chat_with_gemini(user_message: str, chat_history: list, api_key: str) -> tuple[str, str]:
+def chat_with_gemini(user_message: str, chat_history: list, api_key: str, model_name: str) -> tuple[str, str]:
     """
     Send a message to Gemini and get a response.
     Returns tuple of (response_text, model_used)
@@ -1186,48 +1193,44 @@ def chat_with_gemini(user_message: str, chat_history: list, api_key: str) -> tup
     
     full_prompt = "\n\n".join(messages)
     
-    # Try each model in the fallback chain
-    last_error = None
-    
-    for model_name in MODEL_FALLBACK_CHAIN:
-        try:
-            model = genai.GenerativeModel(model_name)
+    try:
+        model = genai.GenerativeModel(model_name)
+        
+        # First call - let Gemini decide if it needs a tool
+        response = model.generate_content(full_prompt)
+        response_text = response.text
+        
+        # Check if Gemini wants to call a tool
+        if 'TOOL_CALL:' in response_text:
+            # Extract tool call
+            tool_line = [line for line in response_text.split('\n') if 'TOOL_CALL:' in line][0]
+            tool_call = tool_line.split('TOOL_CALL:')[1].strip()
             
-            # First call - let Gemini decide if it needs a tool
-            response = model.generate_content(full_prompt)
-            response_text = response.text
+            # Execute the tool
+            tool_result = execute_tool_call(tool_call)
             
-            # Check if Gemini wants to call a tool
-            if 'TOOL_CALL:' in response_text:
-                # Extract tool call
-                tool_line = [line for line in response_text.split('\n') if 'TOOL_CALL:' in line][0]
-                tool_call = tool_line.split('TOOL_CALL:')[1].strip()
-                
-                # Execute the tool
-                tool_result = execute_tool_call(tool_call)
-                
-                # Send tool result back to Gemini for final response
-                follow_up = f"{full_prompt}\n\nASSISTANT: {response_text}\n\nTOOL_RESULT:\n{tool_result}\n\nNow provide a helpful response to the user based on this data. Be conversational and explain the key insights."
-                
-                final_response = model.generate_content(follow_up)
-                return (final_response.text, model_name)
-            else:
-                return (response_text, model_name)
-                
-        except Exception as e:
-            error_str = str(e).lower()
-            last_error = str(e)
+            # Send tool result back to Gemini for final response
+            follow_up = f"{full_prompt}\n\nASSISTANT: {response_text}\n\nTOOL_RESULT:\n{tool_result}\n\nNow provide a helpful response to the user based on this data. Be conversational and explain the key insights."
             
-            # Check if it's a rate limit error
-            if 'resource exhausted' in error_str or 'quota' in error_str or '429' in error_str or 'rate limit' in error_str:
-                # Try next model in chain
-                continue
-            else:
-                # Different error, don't try other models
-                return (f"Error communicating with Gemini: {str(e)}", model_name)
-    
-    # All models exhausted
-    return (f"All models have hit their rate limits. Please try again later. Last error: {last_error}", "none")
+            final_response = model.generate_content(follow_up)
+            return (final_response.text, model_name)
+        else:
+            return (response_text, model_name)
+            
+    except Exception as e:
+        error_str = str(e).lower()
+        
+        if ('resource exhausted' in error_str or 
+            'quota' in error_str or 
+            '429' in error_str or 
+            'rate limit' in error_str):
+            return (f"Rate limit reached for {model_name}. Try selecting a different model from the dropdown.", model_name)
+        elif ('404' in error_str or 
+              'not found' in error_str or 
+              'not supported' in error_str):
+            return (f"Model '{model_name}' is not available via API. Try a different model.", model_name)
+        else:
+            return (f"Error: {str(e)}", model_name)
 
 
 # ------------------------------------
@@ -1242,46 +1245,65 @@ def chat_fragment(api_key: str):
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     
-    # Initialize current model tracker
-    if 'current_model' not in st.session_state:
-        st.session_state.current_model = MODEL_FALLBACK_CHAIN[0]
+    # Initialize selected model
+    if 'selected_model' not in st.session_state:
+        st.session_state.selected_model = list(AVAILABLE_MODELS.keys())[0]
+    
+    # Model selector at top
+    col1, col2 = st.columns([5, 2])
+    with col2:
+        selected = st.selectbox(
+            "Model",
+            options=list(AVAILABLE_MODELS.keys()),
+            format_func=lambda x: AVAILABLE_MODELS[x],
+            index=list(AVAILABLE_MODELS.keys()).index(st.session_state.selected_model),
+            label_visibility="collapsed",
+            key="model_selector"
+        )
+        st.session_state.selected_model = selected
+    
+    # Input row with clear button
+    input_col, clear_col = st.columns([6, 1])
+    
+    with clear_col:
+        clear_clicked = st.button("Clear", use_container_width=True, key="clear_chat")
+    
+    with input_col:
+        prompt = st.chat_input("Ask about your strategy...")
+    
+    # Handle clear - wipe history and rerun to refresh the UI
+    if clear_clicked:
+        st.session_state.chat_history = []
+        st.rerun()
     
     # Display chat history
     for msg in st.session_state.chat_history:
         with st.chat_message(msg['role']):
             st.markdown(msg['content'])
     
-    # Chat input
-    if prompt := st.chat_input("Ask about your strategy..."):
-        # Display user message immediately
+    # Process new message
+    if prompt:
+        # Display and save user message
         with st.chat_message('user'):
             st.markdown(prompt)
-        
-        # Add to history
         st.session_state.chat_history.append({'role': 'user', 'content': prompt})
         
-        # Get and display AI response
-        with st.chat_message('assistant'):
-            response, model_used = chat_with_gemini(
-                prompt, 
-                st.session_state.chat_history[:-1],
-                api_key
-            )
-            st.markdown(response)
-            
-            # Update current model
-            if model_used != "none":
-                st.session_state.current_model = model_used
+        # Get AI response
+        response, model_used = chat_with_gemini(
+            prompt, 
+            st.session_state.chat_history[:-1],
+            api_key,
+            st.session_state.selected_model
+        )
         
-        # Add response to history
+        # Display and save response
+        with st.chat_message('assistant'):
+            st.markdown(response)
         st.session_state.chat_history.append({'role': 'assistant', 'content': response})
 
 
 def render_ai_assistant_tab():
     """Render the AI Assistant tab."""
-    
-    st.subheader("AI Strategy Assistant")
-    st.markdown("Ask questions about your Earnings Momentum Strategy in plain English.")
     
     # Get API key from backend
     api_key = get_api_key()
@@ -1318,56 +1340,18 @@ def render_ai_assistant_tab():
         """)
         return
     
-    # Initialize chat history
+    # Initialize
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
+    if 'selected_model' not in st.session_state:
+        st.session_state.selected_model = list(AVAILABLE_MODELS.keys())[0]
     
-    # Initialize current model
-    if 'current_model' not in st.session_state:
-        st.session_state.current_model = MODEL_FALLBACK_CHAIN[0]
+    # Header
+    st.markdown("**Ask me anything about your Earnings Momentum Strategy**")
     
-    # Top bar with status, model, and clear button
-    col1, col2, col3, col4 = st.columns([2, 1.5, 0.8, 0.8])
-    with col1:
-        st.success("AI Assistant Connected")
-    with col2:
-        st.caption(f"Model: {st.session_state.current_model}")
-    with col3:
-        msg_count = len(st.session_state.chat_history) // 2
-        st.caption(f"{msg_count} msgs")
-    with col4:
-        if st.button("Clear", use_container_width=True):
-            st.session_state.chat_history = []
-            st.session_state.current_model = MODEL_FALLBACK_CHAIN[0]
-            st.rerun()
-    
-    # Example questions (only show when chat is empty)
+    # Empty state hint
     if len(st.session_state.chat_history) == 0:
-        st.markdown("##### Try asking:")
-        
-        example_col1, example_col2 = st.columns(2)
-        
-        examples = [
-            "What stocks are signaling this week?",
-            "Show me the strategy performance",
-            "Tell me about KSS",
-            "Run a backtest with 15% stop loss",
-            "What are the risk metrics?",
-            "How do beats compare to misses?",
-        ]
-        
-        with example_col1:
-            for ex in examples[:3]:
-                st.markdown(f"- {ex}")
-        
-        with example_col2:
-            for ex in examples[3:]:
-                st.markdown(f"- {ex}")
-        
-        st.markdown("---")
+        st.markdown("_Try: \"What stocks are signaling?\" or \"Show me the strategy performance\" or \"What are the risk metrics?\"_")
     
-    # Render the chat fragment (only this reruns on chat)
+    # Render the chat fragment (fast - no full page rerun)
     chat_fragment(api_key)
-    
-    # Footer
-    st.caption("Powered by Google Gemini | Auto-switches models when rate limited (60 total requests/day)")
