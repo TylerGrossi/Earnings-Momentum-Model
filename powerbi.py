@@ -4,26 +4,17 @@ import streamlit as st
 def render_powerbi_tab():
     """Render the PowerBI tab."""
     
-    st.markdown("### PowerBI Dashboard")
-    
-    st.markdown(
-        '[Open in Full Screen ↗](https://app.powerbi.com/view?r=eyJrIjoiZWRlNGNjYTgtODNhYy00MjBjLThhMjctMzgyNmYzNzIwZGRiIiwidCI6IjhkMWE2OWVjLTAzYjUtNDM0NS1hZTIxLWRhZDExMmY1ZmI0ZiIsImMiOjN9)',
-        unsafe_allow_html=True
-    )
-    
-    st.markdown("---")
-    
     st.markdown("""
     <style>
         .powerbi-container {
             position: relative;
             width: 100%;
-            padding-bottom: 55.4%;
-            height: 0;
+            height: 85vh;
             overflow: hidden;
             background: #0f172a;
             border-radius: 8px;
             border: 1px solid #334155;
+            margin-bottom: 1rem;
         }
         .powerbi-container iframe {
             position: absolute;
@@ -34,6 +25,15 @@ def render_powerbi_tab():
             border: none;
             border-radius: 8px;
         }
+        .fullscreen-link {
+            display: inline-block;
+            margin-top: 0.5rem;
+            color: #60a5fa;
+            text-decoration: none;
+        }
+        .fullscreen-link:hover {
+            text-decoration: underline;
+        }
     </style>
     <div class="powerbi-container">
         <iframe 
@@ -42,4 +42,5 @@ def render_powerbi_tab():
             allowFullScreen="true">
         </iframe>
     </div>
+    <a class="fullscreen-link" href="https://app.powerbi.com/view?r=eyJrIjoiZWRlNGNjYTgtODNhYy00MjBjLThhMjctMzgyNmYzNzIwZGRiIiwidCI6IjhkMWE2OWVjLTAzYjUtNDM0NS1hZTIxLWRhZDExMmY1ZmI0ZiIsImMiOjN9" target="_blank">Open in Full Screen ↗</a>
     """, unsafe_allow_html=True)
