@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-import yfinance as yf
 
 from utils import get_all_tickers, get_finviz_data, has_buy_signal, get_date_check, earnings_sort_key
 from data_loader import get_this_week_earnings
@@ -83,70 +82,6 @@ def has_earnings_happened(earnings_date, earnings_timing):
         return False
 
 
-def _entry_date(earnings_date, timing):
-    """Entry date (date only): BMO = day before earnings, AMC = day of earnings (4 PM close that day)."""
-    if earnings_date is None:
-        return None
-    ed = earnings_date.date() if hasattr(earnings_date, 'date') else pd.to_datetime(earnings_date).date()
-    t = str(timing).strip().upper() if pd.notna(timing) and timing else ""
-    if t == "BMO":
-        return ed - timedelta(days=1)
-    return ed
-
-
-def _add_return_from_entry(all_rows):
-    """
-    Add 'Return from entry' to each row: return from entry close (4 PM day before BMO, 4 PM day of AMC)
-    until current price when button was pressed. Uses yfinance.
-    """
-    if not all_rows:
-        return all_rows
-    tickers = list({r["Ticker"] for r in all_rows})
-    entry_dates = []
-    for r in all_rows:
-        ed = r.get("_ed")
-        timing = r.get("_timing", "")
-        entry_d = _entry_date(ed, timing)
-        entry_dates.append(entry_d)
-    start = min(d for d in entry_dates if d is not None) - timedelta(days=5) if entry_dates else datetime.now(MARKET_TZ).date()
-    end = datetime.now(MARKET_TZ).date() + timedelta(days=1)
-    try:
-        px = yf.download(tickers, start=start, end=end, group_by="ticker", auto_adjust=True, progress=False, threads=False)
-        if px.empty:
-            for r in all_rows:
-                r["Return from entry"] = "N/A"
-            return all_rows
-        single_ticker = len(tickers) == 1
-        for i, r in enumerate(all_rows):
-            t, entry_d = r["Ticker"], entry_dates[i]
-            ret_str = "N/A"
-            if entry_d is not None:
-                try:
-                    if single_ticker:
-                        close_series = px["Close"] if "Close" in px.columns else px[tickers[0]]["Close"]
-                    else:
-                        close_series = px[t]["Close"] if t in px.columns.get_level_values(0) else None
-                    if close_series is None or (hasattr(close_series, 'empty') and close_series.empty):
-                        r["Return from entry"] = ret_str
-                        continue
-                    close_series = close_series.dropna()
-                    if hasattr(close_series.index, 'tz') and close_series.index.tz is not None:
-                        close_series.index = close_series.index.tz_localize(None)
-                    entry_series = close_series[close_series.index.date <= entry_d]
-                    entry_price = entry_series.iloc[-1] if not entry_series.empty else None
-                    current_price = close_series.iloc[-1] if not close_series.empty else None
-                    if entry_price is not None and current_price is not None and entry_price > 0:
-                        ret = (float(current_price) / float(entry_price)) - 1
-                        ret_str = f"{ret:+.2%}"
-                except Exception:
-                    pass
-            r["Return from entry"] = ret_str
-    except Exception:
-        for r in all_rows:
-            r["Return from entry"] = "N/A"
-    return all_rows
-
-
 def render_stock_screener_tab(raw_returns_df):
     """Render the Stock Screener tab."""
     
@@ -193,9 +128,7 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": format_value(row.get('P/E')),
                     "Beta": format_value(row.get('Beta')),
                     "Market Cap": format_market_cap(row.get('Market Cap')),
-                    "Status": status,
-                    "_ed": earnings_date,
-                    "_timing": timing,
+                    "Status": status
                 })
         
         # Status text for progress
@@ -275,9 +208,7 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": data.get("P/E", "N/A"),
                     "Beta": data.get("Beta", "N/A"),
                     "Market Cap": market_cap,
-                    "Status": status,
-                    "_ed": datetime.combine(earnings_date, datetime.min.time()) if earnings_date else None,
-                    "_timing": earnings_timing,
+                    "Status": status
                 })
             
             progress.progress(0.5 + (i + 1) / len(barchart_passed) * 0.5)
@@ -288,23 +219,20 @@ def render_stock_screener_tab(raw_returns_df):
         
         # Combine tracked + new (from Finviz scan)
         all_rows = tracked_rows + new_rows
-
+        
         # Sort by earnings date
         all_rows = sorted(all_rows, key=earnings_sort_key)
-
-        # Return from entry (4 PM day before BMO, 4 PM day of AMC) until now
-        all_rows = _add_return_from_entry(all_rows)
-
+        
         if not all_rows:
             st.warning("No tickers match all criteria.")
         else:
             reported_count = len([r for r in all_rows if r['Status'] == "Reported"])
             upcoming_count = len([r for r in all_rows if r['Status'] == "Upcoming"])
-            display_cols = ["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status", "Return from entry"]
+            
             st.caption(f"{len(all_rows)} tickers found ({reported_count} reported, {upcoming_count} upcoming)")
             st.dataframe(
-                pd.DataFrame(all_rows)[display_cols],
-                use_container_width=True,
+                pd.DataFrame(all_rows)[["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status"]],
+                use_container_width=True, 
                 hide_index=True
             )
         
