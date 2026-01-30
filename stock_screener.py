@@ -1,9 +1,14 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
+import yfinance as yf
 
 from utils import get_all_tickers, get_finviz_data, has_buy_signal, get_date_check, earnings_sort_key
 from data_loader import get_this_week_earnings
+
+# US Eastern for entry cutoff (4 PM) and "Reported" so behavior matches main model and is consistent across environments
+MARKET_TZ = ZoneInfo("America/New_York")
 
 
 def format_market_cap(value):
@@ -36,54 +41,110 @@ def format_value(value, decimals=2):
 
 def has_earnings_happened(earnings_date, earnings_timing):
     """
-    Determine if earnings have already happened based on date and timing.
+    True if we're past the entry cutoff (so we could not have bought at close).
+    Uses current time in US Eastern so GitHub and local match.
     
-    Rules:
-    - BMO (Before Market Open): Reported after 4pm the day BEFORE earnings
-    - AMC (After Market Close): Reported after 4pm ON the earnings day
-    - No timing specified: Treat as AMC (conservative - wait until 4pm on earnings day)
+    Entry cutoff:
+    - BMO: 4 PM ET the day *before* earnings (buy at that close)
+    - AMC: 4 PM ET the day *of* earnings (buy at that close)
+    - No timing: treat as AMC (4 PM on earnings day)
     
-    Args:
-        earnings_date: datetime or date object of the earnings date
-        earnings_timing: string like 'BMO', 'AMC', or empty/None
-    
-    Returns:
-        bool: True if earnings have happened, False if upcoming
+    Same cutoff is used for: (1) do not add ticker, (2) Status = "Reported".
     """
     if earnings_date is None:
         return False
-    
-    now = datetime.now()
-    today = now.date()
-    current_hour = now.hour
-    market_close_hour = 16  # 4pm
-    
-    # Convert to date if datetime
+
+    now_et = datetime.now(MARKET_TZ)
+    today = now_et.date()
+    market_close_hour = 16  # 4 PM ET
+
     if hasattr(earnings_date, 'date'):
         earn_date = earnings_date.date()
     else:
-        earn_date = earnings_date
-    
-    # Normalize timing
+        earn_date = pd.to_datetime(earnings_date).date() if earnings_date is not None else None
+    if earn_date is None:
+        return False
+
     timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
-    
-    if "BMO" in timing:
-        # BMO: Earnings happen before market open on earnings_date
-        # So it's "reported" after 4pm the day BEFORE earnings_date
+
+    if timing == "BMO":
         cutoff_date = earn_date - timedelta(days=1)
         if today > cutoff_date:
             return True
-        elif today == cutoff_date and current_hour >= market_close_hour:
+        if today == cutoff_date and now_et.hour >= market_close_hour:
             return True
         return False
     else:
-        # AMC or unknown: Earnings happen after market close on earnings_date
-        # So it's "reported" after 4pm ON the earnings_date
+        # AMC or unknown
         if today > earn_date:
             return True
-        elif today == earn_date and current_hour >= market_close_hour:
+        if today == earn_date and now_et.hour >= market_close_hour:
             return True
         return False
+
+
+def _entry_date(earnings_date, timing):
+    """Entry date (date only): BMO = day before earnings, AMC = day of earnings (4 PM close that day)."""
+    if earnings_date is None:
+        return None
+    ed = earnings_date.date() if hasattr(earnings_date, 'date') else pd.to_datetime(earnings_date).date()
+    t = str(timing).strip().upper() if pd.notna(timing) and timing else ""
+    if t == "BMO":
+        return ed - timedelta(days=1)
+    return ed
+
+
+def _add_return_from_entry(all_rows):
+    """
+    Add 'Return from entry' to each row: return from entry close (4 PM day before BMO, 4 PM day of AMC)
+    until current price when button was pressed. Uses yfinance.
+    """
+    if not all_rows:
+        return all_rows
+    tickers = list({r["Ticker"] for r in all_rows})
+    entry_dates = []
+    for r in all_rows:
+        ed = r.get("_ed")
+        timing = r.get("_timing", "")
+        entry_d = _entry_date(ed, timing)
+        entry_dates.append(entry_d)
+    start = min(d for d in entry_dates if d is not None) - timedelta(days=5) if entry_dates else datetime.now(MARKET_TZ).date()
+    end = datetime.now(MARKET_TZ).date() + timedelta(days=1)
+    try:
+        px = yf.download(tickers, start=start, end=end, group_by="ticker", auto_adjust=True, progress=False, threads=False)
+        if px.empty:
+            for r in all_rows:
+                r["Return from entry"] = "N/A"
+            return all_rows
+        single_ticker = len(tickers) == 1
+        for i, r in enumerate(all_rows):
+            t, entry_d = r["Ticker"], entry_dates[i]
+            ret_str = "N/A"
+            if entry_d is not None:
+                try:
+                    if single_ticker:
+                        close_series = px["Close"] if "Close" in px.columns else px[tickers[0]]["Close"]
+                    else:
+                        close_series = px[t]["Close"] if t in px.columns.get_level_values(0) else None
+                    if close_series is None or (hasattr(close_series, 'empty') and close_series.empty):
+                        r["Return from entry"] = ret_str
+                        continue
+                    close_series = close_series.dropna()
+                    if hasattr(close_series.index, 'tz') and close_series.index.tz is not None:
+                        close_series.index = close_series.index.tz_localize(None)
+                    entry_series = close_series[close_series.index.date <= entry_d]
+                    entry_price = entry_series.iloc[-1] if not entry_series.empty else None
+                    current_price = close_series.iloc[-1] if not close_series.empty else None
+                    if entry_price is not None and current_price is not None and entry_price > 0:
+                        ret = (float(current_price) / float(entry_price)) - 1
+                        ret_str = f"{ret:+.2%}"
+                except Exception:
+                    pass
+            r["Return from entry"] = ret_str
+    except Exception:
+        for r in all_rows:
+            r["Return from entry"] = "N/A"
+    return all_rows
 
 
 def render_stock_screener_tab(raw_returns_df):
@@ -132,7 +193,9 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": format_value(row.get('P/E')),
                     "Beta": format_value(row.get('Beta')),
                     "Market Cap": format_market_cap(row.get('Market Cap')),
-                    "Status": status
+                    "Status": status,
+                    "_ed": earnings_date,
+                    "_timing": timing,
                 })
         
         # Status text for progress
@@ -157,8 +220,8 @@ def render_stock_screener_tab(raw_returns_df):
         
         new_rows = []
         skipped = []
-        today = datetime.today().date()
-        
+        today = datetime.now(MARKET_TZ).date()
+
         for i, t in enumerate(barchart_passed):
             data = get_finviz_data(t)
             date_info = get_date_check(t)
@@ -179,23 +242,25 @@ def render_stock_screener_tab(raw_returns_df):
                 except:
                     pass
             
-            # Skip conditions
+            # Skip conditions: don't add if past entry cutoff (4 PM day before BMO, 4 PM day of AMC)
             skip_reason = None
-            
+            past_cutoff = has_earnings_happened(earnings_date, earnings_timing)
+
             if date_info["Date Check"] == "DATE PASSED":
                 skip_reason = "DATE PASSED"
+            elif past_cutoff:
+                skip_reason = "Past entry cutoff (can't have bought at close)"
             elif earnings_date and earnings_date < today and t not in tracked_tickers:
                 skip_reason = "MISSED (earnings passed, not in tracker)"
             elif t in tracked_tickers_this_week:
                 skip_reason = "Already in tracker"
-            
+
             if skip_reason:
-                if skip_reason not in ["Already in tracker"]:
-                    skipped.append({
-                        "Ticker": t,
-                        "Earnings": earnings_str,
-                        "Reason": skip_reason
-                    })
+                skipped.append({
+                    "Ticker": t,
+                    "Earnings": earnings_str,
+                    "Reason": skip_reason
+                })
             else:
                 # Format market cap from Finviz (comes as string like "1.08B")
                 market_cap = data.get("Market Cap", "N/A")
@@ -210,7 +275,9 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": data.get("P/E", "N/A"),
                     "Beta": data.get("Beta", "N/A"),
                     "Market Cap": market_cap,
-                    "Status": status
+                    "Status": status,
+                    "_ed": datetime.combine(earnings_date, datetime.min.time()) if earnings_date else None,
+                    "_timing": earnings_timing,
                 })
             
             progress.progress(0.5 + (i + 1) / len(barchart_passed) * 0.5)
@@ -221,20 +288,23 @@ def render_stock_screener_tab(raw_returns_df):
         
         # Combine tracked + new (from Finviz scan)
         all_rows = tracked_rows + new_rows
-        
+
         # Sort by earnings date
         all_rows = sorted(all_rows, key=earnings_sort_key)
-        
+
+        # Return from entry (4 PM day before BMO, 4 PM day of AMC) until now
+        all_rows = _add_return_from_entry(all_rows)
+
         if not all_rows:
             st.warning("No tickers match all criteria.")
         else:
             reported_count = len([r for r in all_rows if r['Status'] == "Reported"])
             upcoming_count = len([r for r in all_rows if r['Status'] == "Upcoming"])
-            
+            display_cols = ["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status", "Return from entry"]
             st.caption(f"{len(all_rows)} tickers found ({reported_count} reported, {upcoming_count} upcoming)")
             st.dataframe(
-                pd.DataFrame(all_rows)[["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status"]],
-                use_container_width=True, 
+                pd.DataFrame(all_rows)[display_cols],
+                use_container_width=True,
                 hide_index=True
             )
         
