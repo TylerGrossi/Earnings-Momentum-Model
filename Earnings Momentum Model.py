@@ -12,12 +12,15 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time, timezone
+from zoneinfo import ZoneInfo
 import time, re, os
 
 # ------------------------------------
 # CONFIG
 # ------------------------------------
+# Use US Eastern for "today", Date Added, and 4 PM cutoff so GitHub (UTC) and Windows (local) match
+MARKET_TZ = ZoneInfo("America/New_York")
 
 # Output directory
 #OUTPUT_DIR = r"C:\Users\Owner\Desktop\Tyler\OneDrive\Projects\Quantitative Finance\Earnings-Momentum-Model"
@@ -96,7 +99,7 @@ def get_yfinance_earnings_date(ticker):
         if earnings_df is None or earnings_df.empty:
             return None, None
         
-        today = datetime.today().date()
+        today = datetime.now(MARKET_TZ).date()
         best_date, best_timing = None, None
         min_diff = 999
         
@@ -107,8 +110,9 @@ def get_yfinance_earnings_date(ticker):
                 if diff < min_diff and diff <= 60:
                     min_diff = diff
                     best_date = datetime.combine(idx_date, datetime.min.time())
-                    if hasattr(idx, 'hour'):
-                        best_timing = "BMO" if idx.hour < 12 else "AMC"
+                    h = hour_et(idx)
+                    if h is not None:
+                        best_timing = "BMO" if h < 12 else "AMC"
             except:
                 continue
         
@@ -117,30 +121,51 @@ def get_yfinance_earnings_date(ticker):
         return None, None
 
 
-def check_date_status(earnings_date, yfinance_date):
-    """Check if earnings date has passed based on yfinance data."""
+def check_date_status(earnings_date, yfinance_date, date_added=None, timing=None):
+    """Check if earnings date has passed based on yfinance data, or if stock was added after entry close.
+    BMO = buy at 4 PM ET day *before* earnings. AMC = buy at 4 PM ET day *of* earnings.
+    Date Added and cutoff use US Eastern so GitHub (UTC) and Windows (local) give same result."""
     try:
         if earnings_date is None or yfinance_date is None:
-            return "OK"
+            pass  # still check date_added below
+        else:
+            ed = safe_dt(earnings_date)
+            yf_d = safe_dt(yfinance_date)
+            
+            if not (pd.isna(ed) or pd.isna(yf_d)):
+                ed_date = ed.date()
+                yf_date = yf_d.date()
+                date_diff = abs((ed_date - yf_date).days)
+                if date_diff <= 14 and yf_date < ed_date:
+                    return "DATE PASSED"
         
-        ed = safe_dt(earnings_date)
-        yf_d = safe_dt(yfinance_date)
-        
-        if pd.isna(ed) or pd.isna(yf_d):
-            return "OK"
-        
-        ed_date = ed.date()
-        yf_date = yf_d.date()
-        
-        date_diff = abs((ed_date - yf_date).days)
-        if date_diff > 14:
-            return "OK"
-        
-        if yf_date < ed_date:
-            return "DATE PASSED"
-        
+        # If added after entry close (4 PM ET), too late to have bought at close
+        if (date_added is not None and timing
+                and not pd.isna(date_added) and str(date_added).strip() != ""):
+            ed = safe_dt(earnings_date)
+            if pd.notna(ed):
+                ed_date = ed.date() if hasattr(ed, 'date') else pd.to_datetime(ed).date()
+                added_dt = pd.to_datetime(date_added, errors='coerce')
+                if pd.notna(added_dt):
+                    # Interpret Date Added as ET (stored in ET for consistent GitHub vs local)
+                    if getattr(added_dt, 'tzinfo', None) is None:
+                        added_dt = added_dt.tz_localize(MARKET_TZ)
+                    else:
+                        added_dt = added_dt.tz_convert(MARKET_TZ)
+                    added_dt_py = added_dt.to_pydatetime()
+                    timing_upper = str(timing).strip().upper() if timing else ""
+                    if timing_upper == "BMO":
+                        entry_close_et = datetime.combine(
+                            ed_date - timedelta(days=1), time(16, 0, 0), tzinfo=MARKET_TZ
+                        )
+                    elif timing_upper == "AMC":
+                        entry_close_et = datetime.combine(ed_date, time(16, 0, 0), tzinfo=MARKET_TZ)
+                    else:
+                        entry_close_et = None
+                    if entry_close_et is not None and added_dt_py > entry_close_et:
+                        return "DATE PASSED"
         return "OK"
-    except:
+    except Exception:
         return "OK"
 
 
@@ -157,8 +182,9 @@ def get_eps_from_yfinance(ticker, target_date):
         if earnings_df is None or earnings_df.empty:
             return result
         
-        target = target_date.date() if hasattr(target_date, 'date') else pd.to_datetime(target_date).date()
-        
+        target = date_et(target_date) or (target_date.date() if hasattr(target_date, 'date') else pd.to_datetime(target_date).date())
+        if target is None:
+            return result
         best_match, min_diff = None, 999
         for idx in earnings_df.index:
             try:
@@ -178,8 +204,9 @@ def get_eps_from_yfinance(ticker, target_date):
             surp_col = 'Surprise(%)' if 'Surprise(%)' in row.index else 'Surprise (%)'
             if surp_col in row.index and pd.notna(row[surp_col]):
                 result["EPS Surprise (%)"] = float(row[surp_col])
-            if hasattr(best_match, 'hour'):
-                result["Earnings Timing"] = "BMO" if best_match.hour < 12 else "AMC"
+            h = hour_et(best_match)
+            if h is not None:
+                result["Earnings Timing"] = "BMO" if h < 12 else "AMC"
     except:
         pass
     
@@ -223,7 +250,7 @@ def get_fiscal_quarter(ticker, earnings_date):
     """Get fiscal quarter from yfinance earnings_history."""
     try:
         yf_ticker = yf.Ticker(ticker)
-        target = earnings_date.date() if hasattr(earnings_date, 'date') else pd.to_datetime(earnings_date).date()
+        target = date_et(earnings_date) or (earnings_date.date() if hasattr(earnings_date, 'date') else pd.to_datetime(earnings_date).date())
         
         try:
             hist = yf_ticker.earnings_history
@@ -310,11 +337,11 @@ def get_earnings_data(ticker, earnings_date=None):
         
         if earnings_date is None:
             ts = info.get('earningsTimestamp') or info.get('earningsTimestampStart')
-            if ts: earnings_date = datetime.fromtimestamp(ts)
-        
+            if ts:
+                earnings_date = datetime.fromtimestamp(ts, tz=timezone.utc)
         if earnings_date:
             result["Earnings Date"] = earnings_date
-            result["Earnings Released"] = earnings_date.date() < datetime.today().date()
+            result["Earnings Released"] = date_et(earnings_date) < datetime.now(MARKET_TZ).date() if date_et(earnings_date) else False
             result["Fiscal Quarter"] = get_fiscal_quarter(ticker, earnings_date)
         
         # Get yfinance earnings date
@@ -326,7 +353,7 @@ def get_earnings_data(ticker, earnings_date=None):
             result["Date Check"] = date_check
             print(f"      yfinance: {yf_date.strftime('%Y-%m-%d')} | Date Check: {date_check}")
             if date_check == "DATE PASSED":
-                print(f"      ⚠️ Finviz={earnings_date.date() if earnings_date else 'N/A'}, yfinance={yf_date.date()}")
+                print(f"      ⚠️ Finviz={date_et(earnings_date) or 'N/A'}, yfinance={yf_date.date()}")
         else:
             print(f"      yfinance: not found")
             result["Date Check"] = ""
@@ -350,8 +377,9 @@ def get_earnings_data(ticker, earnings_date=None):
             if yf_timing:
                 result["Earnings Timing"] = yf_timing
             elif result["Earnings Date"]:
-                h = result["Earnings Date"].hour
-                result["Earnings Timing"] = "BMO" if h < 10 else ("AMC" if h >= 16 else None)
+                h = hour_et(result["Earnings Date"])
+                if h is not None:
+                    result["Earnings Timing"] = "BMO" if h < 10 else ("AMC" if h >= 16 else None)
     except Exception as e:
         print(f"    Error: {str(e)}")
     
@@ -361,6 +389,30 @@ def get_earnings_data(ticker, earnings_date=None):
 # ------------------------------------
 # HELPER FUNCTIONS
 # ------------------------------------
+
+def hour_et(dt):
+    """Hour (0-23) in US Eastern for BMO/AMC. Naive treated as UTC so GitHub (UTC) and local (ET) match."""
+    if dt is None or pd.isna(dt):
+        return None
+    try:
+        ts = pd.Timestamp(dt)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts.tz_convert(MARKET_TZ).hour
+    except Exception:
+        return None
+
+def date_et(dt):
+    """Date in US Eastern (for earnings 'business date'). Naive treated as UTC."""
+    if dt is None or pd.isna(dt):
+        return None
+    try:
+        ts = pd.Timestamp(dt)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts.tz_convert(MARKET_TZ).date()
+    except Exception:
+        return None
 
 def safe_dt(v):
     if pd.isna(v) or v is None: return pd.NaT
@@ -446,7 +498,7 @@ def backfill(df):
         eps_needs_update = False
         if pd.isna(row.get("EPS Estimate")) and pd.isna(row.get("Reported EPS")):
             ed = safe_dt(row.get("Earnings Date"))
-            if pd.notna(ed) and ed.date() < datetime.today().date():
+            if pd.notna(ed) and ed.date() < datetime.now(MARKET_TZ).date():
                 eps_needs_update = True
         
         yf_date_needs_update = pd.isna(row.get("Earnings Date (yfinance)"))
@@ -468,27 +520,27 @@ def backfill(df):
         fq = row.get("Fiscal Quarter")
         
         try:
-            if pd.notna(ed):
-                if pd.isna(fq) or fq == "" or not (isinstance(fq, str) and "Q" in fq and "FY" in fq):
-                    new_fq = get_fiscal_quarter(t, ed)
-                    if new_fq:
-                        df.at[idx, "Fiscal Quarter"] = new_fq
-                        print(f"  {t} → {new_fq}")
+                if pd.notna(ed):
+                    if pd.isna(fq) or fq == "" or not (isinstance(fq, str) and "Q" in fq and "FY" in fq):
+                        new_fq = get_fiscal_quarter(t, ed)
+                        if new_fq:
+                            df.at[idx, "Fiscal Quarter"] = new_fq
+                            print(f"  {t} → {new_fq}")
                 
                 if pd.isna(row.get("Earnings Date (yfinance)")):
                     yf_date, _ = get_yfinance_earnings_date(t)
                     if yf_date:
                         df.at[idx, "Earnings Date (yfinance)"] = pd.Timestamp(yf_date)
-                        date_check = check_date_status(ed, yf_date)
+                        date_check = check_date_status(ed, yf_date, date_added=row.get("Date Added"), timing=row.get("Earnings Timing"))
                         df.at[idx, "Date Check"] = date_check
                         print(f"    {t}: yfinance date added, Date Check: {date_check}")
                 else:
                     yf_existing = df.at[idx, "Earnings Date (yfinance)"]
                     if pd.notna(yf_existing) and (pd.isna(row.get("Date Check")) or row.get("Date Check") == ""):
-                        date_check = check_date_status(ed, yf_existing)
+                        date_check = check_date_status(ed, yf_existing, date_added=row.get("Date Added"), timing=row.get("Earnings Timing"))
                         df.at[idx, "Date Check"] = date_check
                 
-                if ed.date() < datetime.today().date():
+                if ed.date() < datetime.now(MARKET_TZ).date():
                     if pd.isna(row.get("EPS Estimate")) and pd.isna(row.get("Reported EPS")):
                         eps = get_eps_from_yfinance(t, ed)
                         if eps["EPS Estimate"] is not None:
@@ -522,9 +574,7 @@ def backfill(df):
 
 def build_universe():
     """Scan Finviz for new tickers meeting criteria."""
-    today = datetime.today().date()
-    today_str = today.strftime("%Y-%m-%d")
-    
+    today = datetime.now(MARKET_TZ).date()
     tickers = get_all_tickers()
     print(f"[{today}] Found {len(tickers)} Finviz tickers...")
 
@@ -535,11 +585,13 @@ def build_universe():
         time.sleep(0.3)
     print(f"[{today}] {len(filtered)} passed Barchart filter.")
 
-    # Get existing tickers from returns tracker
-    existing_tickers = set()
+    # Get existing (Ticker, Fiscal Quarter) from returns tracker so new quarters get Date Added
+    def _fq_key(x):
+        return "" if (pd.isna(x) or x == "" or str(x).strip() == "") else str(x).strip()
+    existing_keys = set()
     if os.path.exists(RETURNS_FILE):
         existing_df = pd.read_csv(RETURNS_FILE)
-        existing_tickers = set(existing_df["Ticker"].dropna().unique())
+        existing_keys = set(zip(existing_df["Ticker"].dropna(), existing_df["Fiscal Quarter"].apply(_fq_key)))
 
     rows, skipped = [], []
     for t in filtered:
@@ -558,11 +610,13 @@ def build_universe():
             "Earnings Timing", "Fiscal Quarter", "Earnings Date (yfinance)", "Date Check"
         ]})
         
-        if t not in existing_tickers:
-            row["Date Added"] = today_str
-            print(f"    ✅ NEW: {row.get('Company Name')} | {e.get('Fiscal Quarter')} | Added: {today_str}")
+        row_fq = _fq_key(row.get("Fiscal Quarter"))
+        is_new = (t, row_fq) not in existing_keys
+        if is_new:
+            row["Date Added"] = datetime.now(MARKET_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            print(f"    ✅ NEW: {row.get('Company Name')} | {e.get('Fiscal Quarter')} | Added: {row['Date Added']}")
         else:
-            row["Date Added"] = None
+            row["Date Added"] = None  # preserved from existing in update_returns
             print(f"    ✅ {row.get('Company Name')} | {e.get('Fiscal Quarter')}")
         
         rows.append(row)
@@ -636,7 +690,7 @@ def update_returns(new_rows):
         return udf
     
     start = pd.to_datetime(valid.min()) - timedelta(days=5)
-    end = datetime.today() + timedelta(days=2)
+    end = datetime.now(MARKET_TZ) + timedelta(days=2)
     
     print(f"\nDownloading prices for {len(tickers)} tickers...")
     px = yf.download(tickers, start=start, end=end, group_by="ticker", auto_adjust=True, progress=False)
@@ -652,10 +706,11 @@ def update_returns(new_rows):
             base = get_base(p, d, timing)
             hi, lo, rng, hip, lop = get_stats(p, d, 7, timing)
             
+            date_check = check_date_status(d, r.get("Earnings Date (yfinance)"), date_added=r.get("Date Added"), timing=timing)
             rows.append({
                 "Ticker": t, "Fiscal Quarter": r.get("Fiscal Quarter"), 
                 "Earnings Date": d, "Earnings Date (yfinance)": r.get("Earnings Date (yfinance)"),
-                "Date Check": r.get("Date Check"), "Date Added": r.get("Date Added"),
+                "Date Check": date_check, "Date Added": r.get("Date Added"),
                 "Earnings Timing": timing,
                 "Price": round(base, 2) if pd.notna(base) else np.nan,
                 "EPS (TTM)": r.get("EPS (TTM)"), "EPS Estimate": r.get("EPS Estimate"), 
@@ -725,7 +780,7 @@ def export_hourly_prices(udf, days_after=5):
             start_date = earnings_date - timedelta(days=7)
             end_date = earnings_date + timedelta(days=days_after + 5)
             
-            today = datetime.today()
+            today = datetime.now(MARKET_TZ)
             if end_date > today:
                 end_date = today + timedelta(days=1)
             
@@ -866,7 +921,7 @@ def export_hourly_prices(udf, days_after=5):
 if __name__ == "__main__":
     print("=" * 60)
     print("EARNINGS MOMENTUM v17")
-    print(f"📅 {datetime.today().strftime('%Y-%m-%d %H:%M')}")
+    print(f"📅 {datetime.now(MARKET_TZ).strftime('%Y-%m-%d %H:%M')} ET")
     print("=" * 60)
     
     # Step 1: Find new tickers from Finviz + Barchart
