@@ -1,13 +1,9 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, time
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 
 from utils import get_all_tickers, get_finviz_data, has_buy_signal, get_date_check, earnings_sort_key
 from data_loader import get_this_week_earnings
-
-# US Eastern for entry cutoff (4 PM) and "Reported" so behavior matches main model and is consistent across environments
-MARKET_TZ = ZoneInfo("America/New_York")
 
 
 def format_market_cap(value):
@@ -40,44 +36,52 @@ def format_value(value, decimals=2):
 
 def has_earnings_happened(earnings_date, earnings_timing):
     """
-    True if we're past the entry cutoff (so we could not have bought at close).
-    Uses current time in US Eastern so GitHub and local match.
+    Determine if earnings have already happened based on date and timing.
     
-    Entry cutoff:
-    - BMO: 4 PM ET the day *before* earnings (buy at that close)
-    - AMC: 4 PM ET the day *of* earnings (buy at that close)
-    - No timing: treat as AMC (4 PM on earnings day)
+    Rules:
+    - BMO (Before Market Open): Reported after 4pm the day BEFORE earnings
+    - AMC (After Market Close): Reported after 4pm ON the earnings day
+    - No timing specified: Treat as AMC (conservative - wait until 4pm on earnings day)
     
-    Same cutoff is used for: (1) do not add ticker, (2) Status = "Reported".
+    Args:
+        earnings_date: datetime or date object of the earnings date
+        earnings_timing: string like 'BMO', 'AMC', or empty/None
+    
+    Returns:
+        bool: True if earnings have happened, False if upcoming
     """
     if earnings_date is None:
         return False
-
-    now_et = datetime.now(MARKET_TZ)
-    today = now_et.date()
-    market_close_hour = 16  # 4 PM ET
-
+    
+    now = datetime.now()
+    today = now.date()
+    current_hour = now.hour
+    market_close_hour = 16  # 4pm
+    
+    # Convert to date if datetime
     if hasattr(earnings_date, 'date'):
         earn_date = earnings_date.date()
     else:
-        earn_date = pd.to_datetime(earnings_date).date() if earnings_date is not None else None
-    if earn_date is None:
-        return False
-
+        earn_date = earnings_date
+    
+    # Normalize timing
     timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
-
-    if timing == "BMO":
+    
+    if "BMO" in timing:
+        # BMO: Earnings happen before market open on earnings_date
+        # So it's "reported" after 4pm the day BEFORE earnings_date
         cutoff_date = earn_date - timedelta(days=1)
         if today > cutoff_date:
             return True
-        if today == cutoff_date and now_et.hour >= market_close_hour:
+        elif today == cutoff_date and current_hour >= market_close_hour:
             return True
         return False
     else:
-        # AMC or unknown
+        # AMC or unknown: Earnings happen after market close on earnings_date
+        # So it's "reported" after 4pm ON the earnings_date
         if today > earn_date:
             return True
-        if today == earn_date and now_et.hour >= market_close_hour:
+        elif today == earn_date and current_hour >= market_close_hour:
             return True
         return False
 
@@ -153,8 +157,8 @@ def render_stock_screener_tab(raw_returns_df):
         
         new_rows = []
         skipped = []
-        today = datetime.now(MARKET_TZ).date()
-
+        today = datetime.today().date()
+        
         for i, t in enumerate(barchart_passed):
             data = get_finviz_data(t)
             date_info = get_date_check(t)
@@ -175,25 +179,23 @@ def render_stock_screener_tab(raw_returns_df):
                 except:
                     pass
             
-            # Skip conditions: don't add if past entry cutoff (4 PM day before BMO, 4 PM day of AMC)
+            # Skip conditions
             skip_reason = None
-            past_cutoff = has_earnings_happened(earnings_date, earnings_timing)
-
+            
             if date_info["Date Check"] == "DATE PASSED":
                 skip_reason = "DATE PASSED"
-            elif past_cutoff:
-                skip_reason = "Past entry cutoff (can't have bought at close)"
             elif earnings_date and earnings_date < today and t not in tracked_tickers:
                 skip_reason = "MISSED (earnings passed, not in tracker)"
             elif t in tracked_tickers_this_week:
                 skip_reason = "Already in tracker"
-
+            
             if skip_reason:
-                skipped.append({
-                    "Ticker": t,
-                    "Earnings": earnings_str,
-                    "Reason": skip_reason
-                })
+                if skip_reason not in ["Already in tracker"]:
+                    skipped.append({
+                        "Ticker": t,
+                        "Earnings": earnings_str,
+                        "Reason": skip_reason
+                    })
             else:
                 # Format market cap from Finviz (comes as string like "1.08B")
                 market_cap = data.get("Market Cap", "N/A")
