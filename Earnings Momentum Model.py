@@ -425,6 +425,22 @@ def to_num(x):
     try: return float(str(x).replace(",", "").replace("$", "").strip())
     except: return np.nan
 
+def normalize_tz(series):
+    """Convert datetime series to timezone-naive, handling both aware and naive timestamps."""
+    if series is None or series.empty:
+        return series
+    # Convert to datetime if not already
+    series = pd.to_datetime(series, errors='coerce')
+    # Remove timezone info if present
+    if hasattr(series.dtype, 'tz') and series.dtype.tz is not None:
+        series = series.dt.tz_localize(None)
+    # Handle individual timezone-aware timestamps
+    try:
+        series = series.apply(lambda x: x.tz_localize(None) if pd.notna(x) and hasattr(x, 'tz') and x.tz is not None else x)
+    except:
+        pass
+    return series
+
 def parse_mcap(v):
     if pd.isna(v): return np.nan
     v = str(v).upper().replace("$", "").strip()
@@ -485,7 +501,7 @@ def backfill(df):
     """Backfill missing data in existing returns tracker."""
     if "Earnings Date (yfinance)" not in df.columns:
         df["Earnings Date (yfinance)"] = pd.NaT
-    df["Earnings Date (yfinance)"] = pd.to_datetime(df["Earnings Date (yfinance)"], errors='coerce')
+    df["Earnings Date (yfinance)"] = normalize_tz(df["Earnings Date (yfinance)"])
     
     for col in ["EPS Estimate", "Reported EPS", "EPS Surprise (%)", "Fiscal Quarter", "Earnings Timing", "Date Added", "Date Check"]:
         if col not in df.columns: 
@@ -640,16 +656,18 @@ def update_returns(new_rows):
     # Load existing data
     if os.path.exists(RETURNS_FILE):
         existing_df = pd.read_csv(RETURNS_FILE)
-        existing_df["Earnings Date"] = pd.to_datetime(existing_df["Earnings Date"], errors='coerce')
-        existing_df["Earnings Date (yfinance)"] = pd.to_datetime(existing_df.get("Earnings Date (yfinance)"), errors='coerce')
+        existing_df["Earnings Date"] = normalize_tz(existing_df["Earnings Date"])
+        if "Earnings Date (yfinance)" in existing_df.columns:
+            existing_df["Earnings Date (yfinance)"] = normalize_tz(existing_df["Earnings Date (yfinance)"])
     else:
         existing_df = pd.DataFrame()
     
     # Add new rows
     if new_rows:
         new_df = pd.DataFrame(new_rows)
-        new_df["Earnings Date"] = pd.to_datetime(new_df["Earnings Date"], errors='coerce')
-        new_df["Earnings Date (yfinance)"] = pd.to_datetime(new_df["Earnings Date (yfinance)"], errors='coerce')
+        new_df["Earnings Date"] = normalize_tz(new_df["Earnings Date"])
+        if "Earnings Date (yfinance)" in new_df.columns:
+            new_df["Earnings Date (yfinance)"] = normalize_tz(new_df["Earnings Date (yfinance)"])
         
         for c in ["Price", "EPS (TTM)", "P/E", "Forward P/E", "Beta", "EPS Estimate", "Reported EPS", "EPS Surprise (%)"]:
             if c in new_df.columns: new_df[c] = new_df[c].apply(to_num)
@@ -685,11 +703,13 @@ def update_returns(new_rows):
     if not tickers:
         return udf
     
+    # Ensure Earnings Date is normalized before using
+    udf["Earnings Date"] = normalize_tz(udf["Earnings Date"])
     valid = udf["Earnings Date"].dropna()
     if valid.empty:
         return udf
     
-    start = pd.to_datetime(valid.min()) - timedelta(days=5)
+    start = valid.min() - timedelta(days=5)
     end = datetime.now(MARKET_TZ) + timedelta(days=2)
     
     print(f"\nDownloading prices for {len(tickers)} tickers...")
@@ -734,8 +754,9 @@ def update_returns(new_rows):
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["Earnings Date"] = pd.to_datetime(df["Earnings Date"], errors='coerce')
-        df["Earnings Date (yfinance)"] = pd.to_datetime(df["Earnings Date (yfinance)"], errors='coerce')
+        df["Earnings Date"] = normalize_tz(df["Earnings Date"])
+        if "Earnings Date (yfinance)" in df.columns:
+            df["Earnings Date (yfinance)"] = normalize_tz(df["Earnings Date (yfinance)"])
         df = df.sort_values("Earnings Date").reset_index(drop=True)
     
     df.to_csv(RETURNS_FILE, index=False)
@@ -755,7 +776,7 @@ def export_hourly_prices(udf, days_after=5):
         return
     
     udf = udf.copy()
-    udf["Earnings Date"] = pd.to_datetime(udf["Earnings Date"], errors='coerce')
+    udf["Earnings Date"] = normalize_tz(udf["Earnings Date"])
     
     valid = udf[udf["Earnings Date"].notna()].copy()
     if valid.empty:
