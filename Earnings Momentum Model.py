@@ -621,6 +621,19 @@ def build_universe():
             time.sleep(0.3)
             continue
         
+        # Skip if earnings date is more than 2 weeks in advance
+        earnings_date = e.get("Earnings Date")
+        if earnings_date:
+            ed = safe_dt(earnings_date)
+            if pd.notna(ed):
+                ed_date = ed.date() if hasattr(ed, 'date') else pd.to_datetime(ed).date()
+                days_until_earnings = (ed_date - today).days
+                if days_until_earnings > 14:
+                    print(f"    ⏭️ SKIPPED: Earnings too far out ({days_until_earnings} days)")
+                    skipped.append((t, f"TOO FAR ({days_until_earnings} days)"))
+                    time.sleep(0.3)
+                    continue
+        
         row.update({k: e.get(k) for k in [
             "Earnings Date", "EPS Estimate", "Reported EPS", "EPS Surprise (%)", 
             "Earnings Timing", "Fiscal Quarter", "Earnings Date (yfinance)", "Date Check"
