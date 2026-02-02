@@ -290,7 +290,8 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
     st.markdown("---")
     st.markdown("#### Simple Beat vs Miss (Any Amount)")
     
-    known_df = analysis_df[analysis_df['EPS Surprise (%)'].notna()].copy()
+    # Use the same filtered data as the table above (scatter_df) for consistency
+    known_df = scatter_df.copy()
     known_df['Beat/Miss'] = known_df['EPS Surprise (%)'].apply(
         lambda x: 'Beat' if x > 0 else 'Miss'
     )
