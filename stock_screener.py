@@ -400,8 +400,42 @@ def render_stock_screener_tab(raw_returns_df):
             upcoming_count = len([r for r in all_rows if r['Status'] == "Upcoming"])
             
             st.caption(f"{len(all_rows)} tickers found ({reported_count} reported, {upcoming_count} upcoming)")
+            
+            # Create dataframe
+            df = pd.DataFrame(all_rows)[["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status", "Return"]]
+            
+            # Calculate total return
+            def parse_return(return_str):
+                """Parse return string like '+5.23%' or '-2.15%' to float, or return None for 'N/A'."""
+                if return_str == "N/A" or pd.isna(return_str):
+                    return None
+                try:
+                    # Remove % and convert to float
+                    return float(str(return_str).replace('%', '').replace('+', ''))
+                except:
+                    return None
+            
+            # Sum all valid returns
+            returns = [parse_return(r['Return']) for r in all_rows]
+            valid_returns = [r for r in returns if r is not None]
+            total_return = sum(valid_returns) if valid_returns else None
+            
+            # Add total row
+            if total_return is not None:
+                total_row = {
+                    "Ticker": "TOTAL",
+                    "Earnings": "",
+                    "Price": "",
+                    "P/E": "",
+                    "Beta": "",
+                    "Market Cap": "",
+                    "Status": f"{len(valid_returns)} reported",
+                    "Return": f"{total_return:+.2f}%"
+                }
+                df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+            
             st.dataframe(
-                pd.DataFrame(all_rows)[["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status", "Return"]],
+                df,
                 use_container_width=True, 
                 hide_index=True
             )
