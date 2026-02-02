@@ -1,9 +1,13 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from utils import get_all_tickers, get_finviz_data, has_buy_signal, get_date_check, earnings_sort_key
 from data_loader import get_this_week_earnings
+
+# Use US Eastern for market close time (4pm ET)
+MARKET_TZ = ZoneInfo("America/New_York")
 
 
 def format_market_cap(value):
@@ -55,10 +59,11 @@ def has_earnings_happened(earnings_date, earnings_timing):
     if earnings_date is None:
         return False
     
-    now = datetime.now()
-    today = now.date()
-    current_hour = now.hour
-    market_close_hour = 16  # 4pm
+    # Get current time in Eastern Time (market timezone)
+    now_et = datetime.now(MARKET_TZ)
+    today = now_et.date()
+    current_hour = now_et.hour
+    market_close_hour = 16  # 4pm ET
     
     # Convert to date if datetime
     if hasattr(earnings_date, 'date'):
@@ -182,7 +187,7 @@ def render_stock_screener_tab(raw_returns_df):
         
         new_rows = []
         skipped = []
-        today = datetime.today().date()
+        today = datetime.now(MARKET_TZ).date()  # Use Eastern Time date
         
         for i, t in enumerate(barchart_passed):
             data = get_finviz_data(t)
