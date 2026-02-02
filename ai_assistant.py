@@ -19,6 +19,14 @@ from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 
+# Try to import sklearn for KNN
+try:
+    from sklearn.neighbors import NearestNeighbors
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+
 # Try to import Google Generative AI
 try:
     import google.generativeai as genai
@@ -46,6 +54,7 @@ HEADERS = {
 # ------------------------------------
 # Available models - only ones that work with the API
 AVAILABLE_MODELS = {
+    "gemini-3-flash-preview": "Gemini 3 Flash",  # Default model (preview)
     "gemini-2.5-flash": "Gemini 2.5 Flash",
     "gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
 }
@@ -580,6 +589,153 @@ def list_all_tickers() -> str:
     return result
 
 
+def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
+    """
+    Find similar tickers based on financial metrics using KNN.
+    Compares stocks based on P/E ratio, Beta, Market Cap, and Sector.
+    
+    Args:
+        ticker: Stock ticker to find similar stocks for
+        n_neighbors: Number of similar stocks to return (default: 10)
+    
+    Returns:
+        Formatted string with similar tickers and their stats
+    """
+    if not SKLEARN_AVAILABLE:
+        return "Error: scikit-learn package not installed. Run: `pip install scikit-learn`"
+    
+    df = load_returns_data()
+    if df.empty:
+        return "Could not load data."
+    
+    # Filter to most recent entry per ticker
+    df = df.sort_values('Earnings Date', ascending=False)
+    df = df.drop_duplicates(subset=['Ticker'], keep='first')
+    
+    # Find the target ticker
+    target_row = df[df['Ticker'].str.upper() == ticker.upper()]
+    if target_row.empty:
+        return f"Ticker {ticker.upper()} not found in the database."
+    
+    target_row = target_row.iloc[0]
+    
+    # Prepare features for KNN
+    # Features: P/E, Beta, Market Cap (numeric), Sector (encoded)
+    feature_cols = ['P/E', 'Beta', 'Market Cap']
+    
+    # Parse Market Cap to numeric
+    def parse_market_cap(val):
+        if pd.isna(val) or val == 'N/A':
+            return np.nan
+        val = str(val).upper().replace(',', '').replace('$', '')
+        multiplier = 1
+        if 'T' in val:
+            multiplier = 1_000_000_000_000
+            val = val.replace('T', '')
+        elif 'B' in val:
+            multiplier = 1_000_000_000
+            val = val.replace('B', '')
+        elif 'M' in val:
+            multiplier = 1_000_000
+            val = val.replace('M', '')
+        elif 'K' in val:
+            multiplier = 1_000
+            val = val.replace('K', '')
+        try:
+            return float(val) * multiplier
+        except:
+            return np.nan
+    
+    # Create feature dataframe
+    feature_df = df.copy()
+    feature_df['P/E Numeric'] = pd.to_numeric(feature_df['P/E'], errors='coerce')
+    feature_df['Beta Numeric'] = pd.to_numeric(feature_df['Beta'], errors='coerce')
+    feature_df['Market Cap Numeric'] = feature_df['Market Cap'].apply(parse_market_cap)
+    
+    # Encode Sector as numeric (simple approach)
+    if 'Sector' in feature_df.columns:
+        sectors = feature_df['Sector'].dropna().unique()
+        sector_map = {sector: idx for idx, sector in enumerate(sectors)}
+        feature_df['Sector Numeric'] = feature_df['Sector'].map(sector_map)
+    else:
+        feature_df['Sector Numeric'] = 0
+    
+    # Select features for KNN
+    features = ['P/E Numeric', 'Beta Numeric', 'Market Cap Numeric', 'Sector Numeric']
+    
+    # Remove rows with missing values in any feature
+    valid_mask = feature_df[features].notna().all(axis=1)
+    feature_df_valid = feature_df[valid_mask].copy()
+    
+    if len(feature_df_valid) < n_neighbors + 1:
+        return f"Not enough stocks with complete data. Found {len(feature_df_valid)} stocks with all metrics."
+    
+    # Check if target ticker has all features
+    target_valid_mask = feature_df['Ticker'].str.upper() == ticker.upper()
+    target_valid = valid_mask[target_valid_mask]
+    if not target_valid.any():
+        missing_features = []
+        target_idx = feature_df[feature_df['Ticker'].str.upper() == ticker.upper()].index[0]
+        target_row_check = feature_df.loc[target_idx]
+        for feat in features:
+            if pd.isna(target_row_check.get(feat)):
+                missing_features.append(feat.replace(' Numeric', ''))
+        return f"Ticker {ticker.upper()} is missing required metrics: {', '.join(missing_features)}. Cannot find similar stocks."
+    
+    # Prepare feature matrix
+    X = feature_df_valid[features].values
+    
+    # Standardize features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # Find target index in valid dataframe
+    target_idx = feature_df_valid[feature_df_valid['Ticker'].str.upper() == ticker.upper()].index[0]
+    target_pos = feature_df_valid.index.get_loc(target_idx)
+    
+    # Fit KNN
+    nbrs = NearestNeighbors(n_neighbors=min(n_neighbors + 1, len(X_scaled)), algorithm='auto')
+    nbrs.fit(X_scaled)
+    
+    # Find neighbors (including itself, so we'll exclude it)
+    distances, indices = nbrs.kneighbors([X_scaled[target_pos]])
+    
+    # Get similar tickers (exclude the target itself)
+    similar_indices = indices[0][1:]  # Skip first (itself)
+    similar_distances = distances[0][1:]
+    
+    # Build result
+    result = f"## Similar Stocks to {ticker.upper()}\n\n"
+    result += f"**Target Stock:** {target_row.get('Ticker', 'N/A')} - {target_row.get('Company Name', 'N/A')}\n"
+    result += f"- P/E: {target_row.get('P/E', 'N/A')}\n"
+    result += f"- Beta: {target_row.get('Beta', 'N/A')}\n"
+    result += f"- Market Cap: {target_row.get('Market Cap', 'N/A')}\n"
+    result += f"- Sector: {target_row.get('Sector', 'N/A')}\n\n"
+    
+    result += f"**Top {len(similar_indices)} Most Similar Stocks:**\n\n"
+    
+    for i, (idx, dist) in enumerate(zip(similar_indices, similar_distances), 1):
+        similar_row = feature_df_valid.iloc[idx]
+        similarity_score = (1 - dist) * 100  # Convert distance to similarity percentage
+        
+        result += f"{i}. **{similar_row['Ticker']}** - {similar_row.get('Company Name', 'N/A')}\n"
+        result += f"   - Similarity: {similarity_score:.1f}%\n"
+        result += f"   - P/E: {similar_row.get('P/E', 'N/A')}\n"
+        result += f"   - Beta: {similar_row.get('Beta', 'N/A')}\n"
+        result += f"   - Market Cap: {similar_row.get('Market Cap', 'N/A')}\n"
+        result += f"   - Sector: {similar_row.get('Sector', 'N/A')}\n"
+        
+        # Add 5D return if available
+        if '5D Return' in similar_row and pd.notna(similar_row['5D Return']):
+            result += f"   - 5D Return: {similar_row['5D Return']*100:+.2f}%\n"
+        
+        result += "\n"
+    
+    result += "\n_Note: Similarity is calculated based on P/E ratio, Beta, Market Cap, and Sector using K-Nearest Neighbors algorithm._"
+    
+    return result
+
+
 def scan_live_signals() -> str:
     """
     Run live scanner to find stocks currently signaling:
@@ -1083,6 +1239,7 @@ You have access to the following tools:
 9. **compare_stop_losses** - Compares stop loss levels from -2% to -20%
 10. **get_beat_miss_analysis** - Analyzes historical performance by earnings beat vs miss
 11. **list_all_tickers** - Lists all tickers in the database
+12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Example: find_similar_tickers(AAPL, 5)
 
 When a user asks a question:
 1. Determine which tool(s) would help answer their question
@@ -1095,6 +1252,7 @@ IMPORTANT TOOL SELECTION:
 - "What are the risks?" or "Risk factors" -> Use get_risk_metrics()
 - Questions about market cap, sector, beta, or timing filters -> Use analyze_by_filter()
 - "Tell me about [ticker]" -> Use get_stock_details(ticker)
+- "Find similar stocks to [ticker]" or "What stocks are similar to [ticker]?" -> Use find_similar_tickers(ticker)
 
 Examples:
 - "What stocks are signaling this week?" -> TOOL_CALL: scan_live_signals()
@@ -1107,6 +1265,8 @@ Examples:
 - "Tell me about KSS" -> TOOL_CALL: get_stock_details(KSS)
 - "What's the win rate?" -> TOOL_CALL: get_strategy_performance()
 - "Test with 15% stop loss" -> TOOL_CALL: run_backtest(-15, 5)
+- "Find similar stocks to AAPL" -> TOOL_CALL: find_similar_tickers(AAPL, 5)
+- "What stocks are similar to TSLA?" -> TOOL_CALL: find_similar_tickers(TSLA, 5)
 
 RESPONSE FORMATTING RULES:
 - Be conversational and explain the data in plain English
@@ -1167,6 +1327,20 @@ def execute_tool_call(tool_call: str) -> str:
             return get_beat_miss_analysis()
         elif tool_name == 'list_all_tickers':
             return list_all_tickers()
+        elif tool_name == 'find_similar_tickers':
+            # Parse arguments: ticker, optional n_neighbors
+            args_str_clean = args_str.strip()
+            if ',' in args_str_clean:
+                parts = args_str_clean.split(',', 1)
+                ticker = parts[0].strip().strip('"').strip("'")
+                try:
+                    n_neighbors = int(parts[1].strip())
+                except:
+                    n_neighbors = 5
+            else:
+                ticker = args_str_clean.strip().strip('"').strip("'")
+                n_neighbors = 5
+            return find_similar_tickers(ticker, n_neighbors)
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:
@@ -1344,7 +1518,7 @@ def render_ai_assistant_tab():
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     if 'selected_model' not in st.session_state:
-        st.session_state.selected_model = list(AVAILABLE_MODELS.keys())[0]
+        st.session_state.selected_model = "gemini-3-flash-preview"  # Default to Gemini 3 Flash
     
     # Header
     st.markdown("**Ask me anything about your Earnings Momentum Strategy**")
