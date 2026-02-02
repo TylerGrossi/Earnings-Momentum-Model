@@ -39,7 +39,9 @@ def has_earnings_happened(earnings_date, earnings_timing):
     Determine if earnings have already happened based on date and timing.
     
     Rules:
-    - BMO (Before Market Open): Reported after 4pm the day BEFORE earnings
+    - BMO (Before Market Open): 
+        * If earnings are on Monday: Reported after 4pm ON Monday (can't buy on Sunday)
+        * Otherwise: Reported after 4pm the day BEFORE earnings
     - AMC (After Market Close): Reported after 4pm ON the earnings day
     - No timing specified: Treat as AMC (conservative - wait until 4pm on earnings day)
     
@@ -69,13 +71,23 @@ def has_earnings_happened(earnings_date, earnings_timing):
     
     if "BMO" in timing:
         # BMO: Earnings happen before market open on earnings_date
-        # So it's "reported" after 4pm the day BEFORE earnings_date
-        cutoff_date = earn_date - timedelta(days=1)
-        if today > cutoff_date:
-            return True
-        elif today == cutoff_date and current_hour >= market_close_hour:
-            return True
-        return False
+        # Special case: If earnings are on Monday, use Monday 4pm as cutoff
+        # (can't buy on Sunday since market is closed)
+        if earn_date.weekday() == 0:  # Monday is 0
+            # Monday BMO: Show "reported" after 4pm on Monday
+            if today > earn_date:
+                return True
+            elif today == earn_date and current_hour >= market_close_hour:
+                return True
+            return False
+        else:
+            # Regular BMO: Show "reported" after 4pm the day BEFORE earnings_date
+            cutoff_date = earn_date - timedelta(days=1)
+            if today > cutoff_date:
+                return True
+            elif today == cutoff_date and current_hour >= market_close_hour:
+                return True
+            return False
     else:
         # AMC or unknown: Earnings happen after market close on earnings_date
         # So it's "reported" after 4pm ON the earnings_date
@@ -104,6 +116,7 @@ def render_stock_screener_tab(raw_returns_df):
         # Build the reported earnings rows
         tracked_rows = []
         tracked_tickers_this_week = set()
+        skipped_tracked = []
         if not this_week_df.empty:
             for _, row in this_week_df.iterrows():
                 ticker = row.get('Ticker', '')
@@ -121,6 +134,18 @@ def render_stock_screener_tab(raw_returns_df):
                     earnings_str = earnings_date.strftime('%b %d')
                     if pd.notna(timing) and timing:
                         earnings_str += ' ' + str(timing).strip()
+                
+                # Skip Monday BMO earnings (can't buy on Sunday)
+                timing_upper = str(timing).strip().upper() if pd.notna(timing) and timing else ""
+                if earnings_date is not None:
+                    earn_date = earnings_date.date() if hasattr(earnings_date, 'date') else earnings_date
+                    if "BMO" in timing_upper and earn_date.weekday() == 0:  # Monday is 0
+                        skipped_tracked.append({
+                            "Ticker": ticker,
+                            "Earnings": earnings_str,
+                            "Reason": "Monday BMO (no buy opportunity)"
+                        })
+                        continue
                 
                 # Determine status based on whether earnings have actually happened
                 status = "Reported" if has_earnings_happened(earnings_date, timing) else "Upcoming"
@@ -188,6 +213,8 @@ def render_stock_screener_tab(raw_returns_df):
                 skip_reason = "MISSED (earnings passed, not in tracker)"
             elif t in tracked_tickers_this_week:
                 skip_reason = "Already in tracker"
+            elif earnings_date and "BMO" in earnings_timing.upper() and earnings_date.weekday() == 0:  # Monday is 0
+                skip_reason = "Monday BMO (no buy opportunity)"
             
             if skip_reason:
                 if skip_reason not in ["Already in tracker"]:
@@ -238,8 +265,10 @@ def render_stock_screener_tab(raw_returns_df):
                 hide_index=True
             )
         
-        if skipped:
-            with st.expander(f"{len(skipped)} tickers skipped"):
-                st.dataframe(pd.DataFrame(skipped), use_container_width=True, hide_index=True)
+        # Combine all skipped tickers
+        all_skipped = skipped_tracked + skipped
+        if all_skipped:
+            with st.expander(f"{len(all_skipped)} tickers skipped"):
+                st.dataframe(pd.DataFrame(all_skipped), use_container_width=True, hide_index=True)
     else:
         st.caption("Click Find Stocks to scan.")
