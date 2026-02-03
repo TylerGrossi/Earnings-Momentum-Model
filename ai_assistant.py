@@ -1276,7 +1276,7 @@ You have access to the following tools:
 9. **compare_stop_losses** - Compares stop loss levels from -2% to -20%
 10. **get_beat_miss_analysis** - Analyzes historical performance by earnings beat vs miss
 11. **list_all_tickers** - Lists all tickers in the database
-12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Example: find_similar_tickers(AAPL, 5)
+12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Returns a MARKDOWN TABLE with columns: Rank, Ticker, Company, Similarity, P/E, Beta, Market Cap, Sector, 5D Return. When user asks for "table of returns", present this table as-is. Example: find_similar_tickers(AAPL, 5)
 
 When a user asks a question:
 1. Determine which tool(s) would help answer their question
@@ -1304,6 +1304,8 @@ Examples:
 - "Test with 15% stop loss" -> TOOL_CALL: run_backtest(-15, 5)
 - "Find similar stocks to AAPL" -> TOOL_CALL: find_similar_tickers(AAPL, 5)
 - "What stocks are similar to TSLA?" -> TOOL_CALL: find_similar_tickers(TSLA, 5)
+- "Give me a table of the returns" (after finding similar stocks) -> The find_similar_tickers tool already returns a table with stats and returns. Present that table in your response.
+- "Show me a table with returns" -> Use find_similar_tickers if comparing stocks, or present data in table format with stats AND returns
 
 RESPONSE FORMATTING RULES:
 - Be conversational and explain the data in plain English
@@ -1313,6 +1315,20 @@ RESPONSE FORMATTING RULES:
 - DO NOT use asterisks (*) for emphasis in your response - use plain text instead
 - When listing stock details, format clearly: "GE: Price $325.12, Market Cap $342.94B, Earnings Jan 22 BMO"
 - Keep responses concise and readable
+
+CRITICAL TABLE FORMATTING RULES:
+- When a user asks for "table of returns" or "table with returns" or similar table requests:
+  * ALWAYS include BOTH stats (P/E, Beta, Market Cap, Sector) AND returns in the table
+  * Use proper markdown table format with pipes (|) and alignment
+  * Include columns: Ticker, Company, P/E, Beta, Market Cap, Sector, 5D Return (or other return metrics)
+  * Do NOT create a table with only returns - always include the comparison stats
+  * Example format:
+    | Ticker | Company | P/E | Beta | Market Cap | Sector | 5D Return |
+    |--------|---------|-----|------|------------|--------|-----------|
+    | AAPL   | Apple   | 28.5| 1.2  | $3.5T      | Tech   | +5.23%    |
+- The find_similar_tickers tool already returns a properly formatted table with stats and returns
+- If you receive tool results with a table, present that table as-is in your response
+- If user asks for "table of returns" after finding similar stocks, use the table from find_similar_tickers tool results
 """
 
 
