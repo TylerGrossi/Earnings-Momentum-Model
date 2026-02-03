@@ -51,7 +51,7 @@ def format_value(value, decimals=2):
 def calculate_return_to_today(ticker, earnings_date, earnings_timing):
     """
     Calculate return from earnings date to today for a reported ticker.
-    Uses current price from yfinance info (includes after-hours).
+    Simple approach: uses yfinance historical data.
     
     Args:
         ticker: Stock ticker symbol
@@ -78,118 +78,70 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         # Normalize timing
         timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
         
+        # Determine entry date (4pm ET close price on this date is the entry price)
+        # BMO: Entry is 4pm ET on the day BEFORE earnings (buy at previous day's close)
+        # AMC: Entry is 4pm ET on the earnings day (buy at earnings day's close)
+        if "BMO" in timing:
+            entry_date = earn_date - timedelta(days=1)  # Day before earnings
+        else:
+            entry_date = earn_date  # Earnings day
+        
         # Get stock data
         stock = yf.Ticker(ticker)
         
-        # Determine base date based on timing
-        # BMO: use close of day before earnings
-        # AMC: use close of earnings day
-        if "BMO" in timing:
-            # For BMO, get the close price on the day before earnings
-            base_date = earn_date - timedelta(days=1)
-        else:
-            # For AMC, get the close price on the earnings day
-            base_date = earn_date
+        # Calculate days between entry_date and today
+        today = datetime.now(MARKET_TZ).date()
+        days_diff = (today - entry_date).days
         
-        # Get historical price data - start a few days before base_date to ensure we get it
-        start_date = base_date - timedelta(days=5)
-        end_date = datetime.now(MARKET_TZ).date() + timedelta(days=1)  # Include today
+        # Only need data from entry_date onwards (plus small buffer to ensure we get entry_date)
+        # Start a few days before entry_date to account for weekends/holidays, end today
+        start_date = entry_date - timedelta(days=5)  # Small buffer to ensure we get entry_date
+        end_date = today + timedelta(days=1)  # Include today
         
-        # Add error handling for Streamlit Cloud (yfinance might timeout or fail)
-        hist = None
+        # Get minimal historical data needed
         try:
             hist = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-        except Exception as e1:
-            # If history fails with date range, try without date range (slower but more reliable)
+        except:
+            # Fallback: if date range fails, try period (but use minimal period)
             try:
-                hist = stock.history(period="1mo")
-            except Exception as e2:
-                # Last resort: try with longer period
-                try:
-                    hist = stock.history(period="3mo")
-                except:
-                    return None
-        
-        if hist is None or hist.empty:
-            return None
-        
-        # Find the last trading day on or before base_date
-        # Convert hist index dates for comparison
-        hist_dates = [pd.Timestamp(idx).date() if hasattr(idx, 'date') else pd.to_datetime(idx).date() for idx in hist.index]
-        
-        # Find prices on or before base_date
-        valid_indices = [i for i, d in enumerate(hist_dates) if d <= base_date]
-        
-        if not valid_indices:
-            return None
-        
-        base_price = hist.iloc[valid_indices[-1]]['Close']
-        base_price_date = hist_dates[valid_indices[-1]]
-        
-        today = datetime.now(MARKET_TZ).date()
-        
-        # Get most recent price from history first (most reliable on Streamlit Cloud)
-        most_recent_hist_price = hist['Close'].iloc[-1]
-        most_recent_hist_date = hist_dates[-1]
-        
-        # Try to get current price from info (includes after-hours/pre-market)
-        # But prioritize historical data since info might fail on Streamlit Cloud
-        info = {}
-        try:
-            info = stock.info
-        except Exception:
-            # If info fails (common on Streamlit Cloud), we'll use history data only
-            pass
-        
-        # Try multiple sources for current price, prioritizing historical data
-        current_price = None
-        
-        # 1. If history has a price from after base_date, use that (most reliable)
-        if most_recent_hist_date > base_price_date:
-            current_price = most_recent_hist_price
-        
-        # 2. Try after-hours price from info (if available and more recent than base)
-        if info.get('postMarketPrice') and base_price_date == today:
-            current_price = info.get('postMarketPrice')
-        
-        # 3. Try pre-market price from info (if available)
-        if current_price is None and info.get('preMarketPrice') and base_price_date == today:
-            current_price = info.get('preMarketPrice')
-        
-        # 4. Try regular market price from info (if available)
-        if current_price is None:
-            current_price = info.get('regularMarketPrice') or info.get('currentPrice')
-        
-        # 5. Final fallback: use most recent close from history
-        if current_price is None or pd.isna(current_price):
-            current_price = most_recent_hist_price
-        
-        # Calculate return
-        if pd.isna(base_price) or pd.isna(current_price) or base_price == 0:
-            return None
-        
-        # Check if we're comparing the same price (same day, no movement yet)
-        # For same-day AMC earnings, if current_price equals base_price, returns aren't available yet
-        if base_price_date == today and abs(current_price - base_price) < 0.01:
-            # Same day and prices are essentially the same - no movement yet
-            # Check if we have after-hours data
-            has_after_hours = info.get('postMarketPrice') is not None
-            if not has_after_hours:
-                # No after-hours data available yet - return None to show "N/A"
+                # Use max of 10 days or actual days difference + buffer
+                period_days = min(max(days_diff + 5, 5), 10)
+                hist = stock.history(period=f"{period_days}d")
+            except:
                 return None
         
-        # Ensure we have valid prices
-        if pd.isna(base_price) or pd.isna(current_price) or base_price == 0:
+        if hist.empty:
             return None
         
-        return_pct = ((current_price / base_price) - 1) * 100
+        # Convert index to dates for comparison
+        hist_dates = [pd.Timestamp(idx).date() if hasattr(idx, 'date') else pd.to_datetime(idx).date() for idx in hist.index]
         
-        # Round to 2 decimal places to avoid floating point precision issues showing as 0.00%
+        # Find entry price (close price at 4pm ET on entry_date - this is the buy price)
+        # Get the last trading day on or before entry_date
+        entry_indices = [i for i, d in enumerate(hist_dates) if d <= entry_date]
+        if not entry_indices:
+            return None
+        
+        entry_price = hist.iloc[entry_indices[-1]]['Close']  # 4pm close on entry_date
+        entry_date_actual = hist_dates[entry_indices[-1]]
+        
+        # Get current price (most recent close from history - today's 4pm close or most recent)
+        current_price = hist['Close'].iloc[-1]
+        current_date_actual = hist_dates[-1]
+        
+        # Only calculate return if we have price data AFTER the entry date
+        # (need at least one trading day after entry to have a return)
+        if current_date_actual <= entry_date_actual:
+            return None
+        
+        # Calculate return from entry price (4pm ET on entry_date) to current price
+        if pd.isna(entry_price) or pd.isna(current_price) or entry_price == 0:
+            return None
+        
+        return_pct = ((current_price / entry_price) - 1) * 100
         return round(return_pct, 2)
         
-    except Exception as e:
-        # Return None if there's any error (silently fail for Streamlit Cloud)
-        # On Streamlit Cloud, yfinance might fail due to rate limits or network issues
+    except Exception:
         return None
 
 
