@@ -55,7 +55,8 @@ def _get_stock_history(ticker, start_date_str, end_date_str):
         stock = yf.Ticker(ticker)
         hist = stock.history(start=start_date_str, end=end_date_str)
         return hist
-    except:
+    except Exception as e:
+        st.write(f"DEBUG _get_stock_history {ticker}: {type(e).__name__}: {e}")
         return None
 
 
@@ -71,7 +72,8 @@ def _get_current_price(ticker):
         if hasattr(info, 'previous_close') and info.previous_close:
             return float(info.previous_close)
         return None
-    except:
+    except Exception as e:
+        st.write(f"DEBUG _get_current_price {ticker}: {type(e).__name__}: {e}")
         return None
 
 
@@ -129,6 +131,7 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         hist = _get_stock_history(ticker, start_date_str, end_date_str)
         
         if hist is None or hist.empty or len(hist) == 0:
+            st.write(f"DEBUG {ticker}: No history data returned from yfinance")
             return None
         
         # Convert index to date for comparison
@@ -144,6 +147,7 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         # Find entry price: last trading day on or before entry_date
         entry_indices = [i for i, d in enumerate(hist_dates) if d <= entry_date]
         if not entry_indices:
+            st.write(f"DEBUG {ticker}: No entry date found. entry_date={entry_date}, hist_dates={hist_dates}")
             return None
         
         entry_idx = entry_indices[-1]
@@ -157,6 +161,7 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         # If entry date equals current date, use real-time price (includes after-hours)
         if current_date_actual == entry_date_actual:
             realtime_price = _get_current_price(ticker)
+            st.write(f"DEBUG {ticker}: Same day. entry_price={entry_price}, realtime_price={realtime_price}")
             if realtime_price and realtime_price != entry_price:
                 return_pct = ((realtime_price / entry_price) - 1) * 100
                 return round(return_pct, 2)
@@ -170,7 +175,8 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         return_pct = ((current_price / entry_price) - 1) * 100
         return round(return_pct, 2)
         
-    except Exception:
+    except Exception as e:
+        st.write(f"DEBUG {ticker}: Exception - {type(e).__name__}: {e}")
         return None
 
 
@@ -295,6 +301,8 @@ def render_stock_screener_tab(raw_returns_df):
                 return_pct = None
                 if status == "Reported" and earnings_date is not None:
                     return_pct = calculate_return_to_today(ticker, earnings_date, timing)
+                    if return_pct is None:
+                        st.write(f"DEBUG tracked: {ticker} returned None")
                 
                 tracked_rows.append({
                     "Ticker": ticker,
@@ -381,6 +389,8 @@ def render_stock_screener_tab(raw_returns_df):
                 return_pct = None
                 if status == "Reported" and earnings_date is not None:
                     return_pct = calculate_return_to_today(t, earnings_date, earnings_timing)
+                    if return_pct is None:
+                        st.write(f"DEBUG finviz: {t} returned None")
                 
                 new_rows.append({
                     "Ticker": t,
