@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import yfinance as yf
 
 # Handle zoneinfo import (built-in Python 3.9+, fallback for older versions)
 try:
@@ -46,157 +45,6 @@ def format_value(value, decimals=2):
         return f"{float(value):.{decimals}f}"
     except:
         return str(value)
-
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid excessive API calls
-def _get_stock_history(ticker, start_date_str, end_date_str):
-    """Helper function to fetch stock history with caching."""
-    try:
-        # Use yf.download() which works better on cloud servers
-        hist = yf.download(
-            ticker, 
-            start=start_date_str, 
-            end=end_date_str, 
-            progress=False,
-            auto_adjust=True,
-            timeout=10
-        )
-        if hist is not None and not hist.empty:
-            return hist
-        return None
-    except Exception as e:
-        st.write(f"DEBUG _get_stock_history {ticker}: {type(e).__name__}: {e}")
-        return None
-
-
-def _get_current_price(ticker):
-    """Get the current price including after-hours/pre-market."""
-    try:
-        # Use download with 1d period to get most recent price
-        data = yf.download(ticker, period="1d", progress=False, timeout=10)
-        if data is not None and not data.empty:
-            # Handle both single-level and multi-level columns
-            if 'Close' in data.columns:
-                return float(data['Close'].iloc[-1])
-            elif ('Close', ticker) in data.columns:
-                return float(data[('Close', ticker)].iloc[-1])
-        return None
-    except Exception as e:
-        st.write(f"DEBUG _get_current_price {ticker}: {type(e).__name__}: {e}")
-        return None
-
-
-def calculate_return_to_today(ticker, earnings_date, earnings_timing):
-    """
-    Calculate return from earnings date to today for a reported ticker.
-    Uses yfinance to get historical prices.
-    
-    Entry price logic:
-    - BMO: 4pm ET close on day BEFORE earnings (buy at previous day's close)
-    - AMC: 4pm ET close on earnings day (buy at earnings day's close)
-    
-    Args:
-        ticker: Stock ticker symbol
-        earnings_date: Date or datetime of earnings
-        earnings_timing: 'BMO' or 'AMC' or empty
-    
-    Returns:
-        float: Return percentage, or None if calculation fails
-    """
-    if earnings_date is None:
-        return None
-    
-    try:
-        # Convert earnings_date to date
-        if isinstance(earnings_date, str):
-            earn_date = pd.to_datetime(earnings_date).date()
-        elif hasattr(earnings_date, 'date'):
-            earn_date = earnings_date.date()
-        elif isinstance(earnings_date, pd.Timestamp):
-            earn_date = earnings_date.date()
-        else:
-            earn_date = earnings_date
-        
-        # Normalize timing
-        timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
-        
-        # Determine entry date (4pm ET close price on this date is the entry price)
-        # BMO: Entry is 4pm ET on the day BEFORE earnings (buy at previous day's close)
-        # AMC: Entry is 4pm ET on the earnings day (buy at earnings day's close)
-        if "BMO" in timing:
-            entry_date = earn_date - timedelta(days=1)  # Day before earnings
-        else:
-            entry_date = earn_date  # Earnings day
-        
-        # Get current date
-        today = datetime.now(MARKET_TZ).date()
-        
-        # Fetch historical data: start a few days before entry_date to account for weekends/holidays
-        # Use string format for dates which yfinance handles well
-        start_date_str = (entry_date - timedelta(days=10)).strftime('%Y-%m-%d')
-        end_date_str = (today + timedelta(days=1)).strftime('%Y-%m-%d')
-        
-        # Get historical data (with caching)
-        hist = _get_stock_history(ticker, start_date_str, end_date_str)
-        
-        if hist is None or hist.empty or len(hist) == 0:
-            st.write(f"DEBUG {ticker}: No history data returned from yfinance")
-            return None
-        
-        # Convert index to date for comparison
-        hist_dates = []
-        for idx in hist.index:
-            if isinstance(idx, pd.Timestamp):
-                hist_dates.append(idx.date())
-            elif hasattr(idx, 'date'):
-                hist_dates.append(idx.date())
-            else:
-                hist_dates.append(pd.to_datetime(idx).date())
-        
-        # Find entry price: last trading day on or before entry_date
-        entry_indices = [i for i, d in enumerate(hist_dates) if d <= entry_date]
-        if not entry_indices:
-            st.write(f"DEBUG {ticker}: No entry date found. entry_date={entry_date}, hist_dates={hist_dates}")
-            return None
-        
-        # Handle both single-level and multi-level columns from yf.download()
-        if 'Close' in hist.columns:
-            close_col = hist['Close']
-        elif isinstance(hist.columns, pd.MultiIndex):
-            # Multi-level columns like ('Close', 'AAPL')
-            close_col = hist.xs('Close', axis=1, level=0).iloc[:, 0]
-        else:
-            st.write(f"DEBUG {ticker}: Cannot find Close column. Columns: {hist.columns.tolist()}")
-            return None
-        
-        entry_idx = entry_indices[-1]
-        entry_price = float(close_col.iloc[entry_idx])
-        entry_date_actual = hist_dates[entry_idx]
-        
-        # Get current price: most recent close from history
-        current_price = float(close_col.iloc[-1])
-        current_date_actual = hist_dates[-1]
-        
-        # If entry date equals current date, use real-time price (includes after-hours)
-        if current_date_actual == entry_date_actual:
-            realtime_price = _get_current_price(ticker)
-            st.write(f"DEBUG {ticker}: Same day. entry_price={entry_price}, realtime_price={realtime_price}")
-            if realtime_price and realtime_price != entry_price:
-                return_pct = ((realtime_price / entry_price) - 1) * 100
-                return round(return_pct, 2)
-            return 0.0
-        
-        # Validate prices
-        if pd.isna(entry_price) or pd.isna(current_price) or entry_price == 0:
-            return None
-        
-        # Calculate return percentage
-        return_pct = ((current_price / entry_price) - 1) * 100
-        return round(return_pct, 2)
-        
-    except Exception as e:
-        st.write(f"DEBUG {ticker}: Exception - {type(e).__name__}: {e}")
-        return None
 
 
 def has_earnings_happened(earnings_date, earnings_timing):
@@ -316,13 +164,6 @@ def render_stock_screener_tab(raw_returns_df):
                 # Determine status based on whether earnings have actually happened
                 status = "Reported" if has_earnings_happened(earnings_date, timing) else "Upcoming"
                 
-                # Calculate return for reported tickers
-                return_pct = None
-                if status == "Reported" and earnings_date is not None:
-                    return_pct = calculate_return_to_today(ticker, earnings_date, timing)
-                    if return_pct is None:
-                        st.write(f"DEBUG tracked: {ticker} returned None")
-                
                 tracked_rows.append({
                     "Ticker": ticker,
                     "Earnings": earnings_str,
@@ -330,8 +171,7 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": format_value(row.get('P/E')),
                     "Beta": format_value(row.get('Beta')),
                     "Market Cap": format_market_cap(row.get('Market Cap')),
-                    "Status": status,
-                    "Return": f"{return_pct:+.2f}%" if return_pct is not None else "N/A"
+                    "Status": status
                 })
         
         # Status text for progress
@@ -404,13 +244,6 @@ def render_stock_screener_tab(raw_returns_df):
                 # Determine status based on whether earnings have actually happened
                 status = "Reported" if has_earnings_happened(earnings_date, earnings_timing) else "Upcoming"
                 
-                # Calculate return for reported tickers
-                return_pct = None
-                if status == "Reported" and earnings_date is not None:
-                    return_pct = calculate_return_to_today(t, earnings_date, earnings_timing)
-                    if return_pct is None:
-                        st.write(f"DEBUG finviz: {t} returned None")
-                
                 new_rows.append({
                     "Ticker": t,
                     "Earnings": earnings_str,
@@ -418,8 +251,7 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": data.get("P/E", "N/A"),
                     "Beta": data.get("Beta", "N/A"),
                     "Market Cap": market_cap,
-                    "Status": status,
-                    "Return": f"{return_pct:+.2f}%" if return_pct is not None else "N/A"
+                    "Status": status
                 })
             
             progress.progress(0.5 + (i + 1) / len(barchart_passed) * 0.5)
@@ -443,37 +275,7 @@ def render_stock_screener_tab(raw_returns_df):
             st.caption(f"{len(all_rows)} tickers found ({reported_count} reported, {upcoming_count} upcoming)")
             
             # Create dataframe
-            df = pd.DataFrame(all_rows)[["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status", "Return"]]
-            
-            # Calculate total return
-            def parse_return(return_str):
-                """Parse return string like '+5.23%' or '-2.15%' to float, or return None for 'N/A'."""
-                if return_str == "N/A" or pd.isna(return_str):
-                    return None
-                try:
-                    # Remove % and convert to float
-                    return float(str(return_str).replace('%', '').replace('+', ''))
-                except:
-                    return None
-            
-            # Sum all valid returns
-            returns = [parse_return(r['Return']) for r in all_rows]
-            valid_returns = [r for r in returns if r is not None]
-            total_return = sum(valid_returns) if valid_returns else None
-            
-            # Add total row
-            if total_return is not None:
-                total_row = {
-                    "Ticker": "TOTAL",
-                    "Earnings": "",
-                    "Price": "",
-                    "P/E": "",
-                    "Beta": "",
-                    "Market Cap": "",
-                    "Status": f"{len(valid_returns)} reported",
-                    "Return": f"{total_return:+.2f}%"
-                }
-                df = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+            df = pd.DataFrame(all_rows)[["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Status"]]
             
             st.dataframe(
                 df,
