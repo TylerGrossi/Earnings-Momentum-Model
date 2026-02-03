@@ -1,14 +1,23 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 import yfinance as yf
+
+# Handle zoneinfo import (built-in Python 3.9+, fallback for older versions)
+try:
+    from zoneinfo import ZoneInfo
+    MARKET_TZ = ZoneInfo("America/New_York")
+except ImportError:
+    # Fallback for older Python versions
+    try:
+        from backports.zoneinfo import ZoneInfo
+        MARKET_TZ = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz
+        MARKET_TZ = pytz.timezone("America/New_York")
 
 from utils import get_all_tickers, get_finviz_data, has_buy_signal, get_date_check, earnings_sort_key
 from data_loader import get_this_week_earnings
-
-# Use US Eastern for market close time (4pm ET)
-MARKET_TZ = ZoneInfo("America/New_York")
 
 
 def format_market_cap(value):
@@ -86,7 +95,15 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         start_date = base_date - timedelta(days=5)
         end_date = datetime.now(MARKET_TZ).date() + timedelta(days=1)  # Include today
         
-        hist = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+        # Add error handling for Streamlit Cloud (yfinance might timeout or fail)
+        try:
+            hist = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+        except Exception:
+            # If history fails with date range, try without date range (slower but more reliable)
+            try:
+                hist = stock.history(period="1mo")
+            except:
+                return None
         
         if hist.empty:
             return None
@@ -105,7 +122,13 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         base_price_date = hist_dates[valid_indices[-1]]
         
         # Get current price from info (includes after-hours/pre-market)
-        info = stock.info
+        # Add timeout handling for Streamlit Cloud
+        try:
+            info = stock.info
+        except Exception:
+            # If info fails, use history data only
+            info = {}
+        
         today = datetime.now(MARKET_TZ).date()
         
         # Try multiple sources for current price, prioritizing most recent
