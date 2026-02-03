@@ -96,16 +96,21 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         end_date = datetime.now(MARKET_TZ).date() + timedelta(days=1)  # Include today
         
         # Add error handling for Streamlit Cloud (yfinance might timeout or fail)
+        hist = None
         try:
             hist = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-        except Exception:
+        except Exception as e1:
             # If history fails with date range, try without date range (slower but more reliable)
             try:
                 hist = stock.history(period="1mo")
-            except:
-                return None
+            except Exception as e2:
+                # Last resort: try with longer period
+                try:
+                    hist = stock.history(period="3mo")
+                except:
+                    return None
         
-        if hist.empty:
+        if hist is None or hist.empty:
             return None
         
         # Find the last trading day on or before base_date
@@ -121,45 +126,43 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         base_price = hist.iloc[valid_indices[-1]]['Close']
         base_price_date = hist_dates[valid_indices[-1]]
         
-        # Get current price from info (includes after-hours/pre-market)
-        # Add timeout handling for Streamlit Cloud
+        today = datetime.now(MARKET_TZ).date()
+        
+        # Get most recent price from history first (most reliable on Streamlit Cloud)
+        most_recent_hist_price = hist['Close'].iloc[-1]
+        most_recent_hist_date = hist_dates[-1]
+        
+        # Try to get current price from info (includes after-hours/pre-market)
+        # But prioritize historical data since info might fail on Streamlit Cloud
+        info = {}
         try:
             info = stock.info
         except Exception:
-            # If info fails, use history data only
-            info = {}
+            # If info fails (common on Streamlit Cloud), we'll use history data only
+            pass
         
-        today = datetime.now(MARKET_TZ).date()
-        
-        # Try multiple sources for current price, prioritizing most recent
+        # Try multiple sources for current price, prioritizing historical data
         current_price = None
         
-        # 1. Try after-hours price first (most recent)
-        if info.get('postMarketPrice'):
+        # 1. If history has a price from after base_date, use that (most reliable)
+        if most_recent_hist_date > base_price_date:
+            current_price = most_recent_hist_price
+        
+        # 2. Try after-hours price from info (if available and more recent than base)
+        if info.get('postMarketPrice') and base_price_date == today:
             current_price = info.get('postMarketPrice')
         
-        # 2. Try pre-market price
-        if current_price is None and info.get('preMarketPrice'):
+        # 3. Try pre-market price from info (if available)
+        if current_price is None and info.get('preMarketPrice') and base_price_date == today:
             current_price = info.get('preMarketPrice')
         
-        # 3. Try regular market price (current trading price)
+        # 4. Try regular market price from info (if available)
         if current_price is None:
             current_price = info.get('regularMarketPrice') or info.get('currentPrice')
         
-        # 4. If base_date is today, we need to check if there's a newer price available
-        # Get the most recent price from history (might be next trading day)
-        if len(hist) > 0:
-            most_recent_hist_price = hist['Close'].iloc[-1]
-            most_recent_hist_date = hist_dates[-1]
-            
-            # If history has a price from after base_date, use that
-            if most_recent_hist_date > base_price_date:
-                if current_price is None or most_recent_hist_date > today:
-                    current_price = most_recent_hist_price
-        
-        # 5. Fallback to most recent close from history
+        # 5. Final fallback: use most recent close from history
         if current_price is None or pd.isna(current_price):
-            current_price = hist['Close'].iloc[-1]
+            current_price = most_recent_hist_price
         
         # Calculate return
         if pd.isna(base_price) or pd.isna(current_price) or base_price == 0:
@@ -175,13 +178,18 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
                 # No after-hours data available yet - return None to show "N/A"
                 return None
         
+        # Ensure we have valid prices
+        if pd.isna(base_price) or pd.isna(current_price) or base_price == 0:
+            return None
+        
         return_pct = ((current_price / base_price) - 1) * 100
         
         # Round to 2 decimal places to avoid floating point precision issues showing as 0.00%
         return round(return_pct, 2)
         
     except Exception as e:
-        # Return None if there's any error
+        # Return None if there's any error (silently fail for Streamlit Cloud)
+        # On Streamlit Cloud, yfinance might fail due to rate limits or network issues
         return None
 
 

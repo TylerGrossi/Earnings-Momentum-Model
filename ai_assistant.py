@@ -608,6 +608,13 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     if df.empty:
         return "Could not load data."
     
+    # Filter to only stocks with 5D Return data (completed trades)
+    if '5D Return' in df.columns:
+        df = df[df['5D Return'].notna()].copy()
+    
+    if df.empty:
+        return "No stocks with 5D Return data found in the database."
+    
     # Filter to most recent entry per ticker
     df = df.sort_values('Earnings Date', ascending=False)
     df = df.drop_duplicates(subset=['Ticker'], keep='first')
@@ -704,34 +711,46 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     similar_indices = indices[0][1:]  # Skip first (itself)
     similar_distances = distances[0][1:]
     
-    # Build result
+    # Build result with target stock info
     result = f"## Similar Stocks to {ticker.upper()}\n\n"
     result += f"**Target Stock:** {target_row.get('Ticker', 'N/A')} - {target_row.get('Company Name', 'N/A')}\n"
     result += f"- P/E: {target_row.get('P/E', 'N/A')}\n"
     result += f"- Beta: {target_row.get('Beta', 'N/A')}\n"
     result += f"- Market Cap: {target_row.get('Market Cap', 'N/A')}\n"
-    result += f"- Sector: {target_row.get('Sector', 'N/A')}\n\n"
+    result += f"- Sector: {target_row.get('Sector', 'N/A')}\n"
     
+    # Add target's 5D return if available
+    if '5D Return' in target_row and pd.notna(target_row['5D Return']):
+        result += f"- 5D Return: {target_row['5D Return']*100:+.2f}%\n"
+    
+    result += "\n"
     result += f"**Top {len(similar_indices)} Most Similar Stocks:**\n\n"
     
+    # Create table header
+    result += "| Rank | Ticker | Company | Similarity | P/E | Beta | Market Cap | Sector | 5D Return |\n"
+    result += "|------|--------|---------|------------|-----|------|------------|--------|-----------|\n"
+    
+    # Add rows for similar stocks
     for i, (idx, dist) in enumerate(zip(similar_indices, similar_distances), 1):
         similar_row = feature_df_valid.iloc[idx]
         similarity_score = (1 - dist) * 100  # Convert distance to similarity percentage
         
-        result += f"{i}. **{similar_row['Ticker']}** - {similar_row.get('Company Name', 'N/A')}\n"
-        result += f"   - Similarity: {similarity_score:.1f}%\n"
-        result += f"   - P/E: {similar_row.get('P/E', 'N/A')}\n"
-        result += f"   - Beta: {similar_row.get('Beta', 'N/A')}\n"
-        result += f"   - Market Cap: {similar_row.get('Market Cap', 'N/A')}\n"
-        result += f"   - Sector: {similar_row.get('Sector', 'N/A')}\n"
+        ticker_val = similar_row['Ticker']
+        company = similar_row.get('Company Name', 'N/A')
+        pe = similar_row.get('P/E', 'N/A')
+        beta = similar_row.get('Beta', 'N/A')
+        mcap = similar_row.get('Market Cap', 'N/A')
+        sector = similar_row.get('Sector', 'N/A')
         
-        # Add 5D return if available
+        # Format 5D return
         if '5D Return' in similar_row and pd.notna(similar_row['5D Return']):
-            result += f"   - 5D Return: {similar_row['5D Return']*100:+.2f}%\n"
+            return_str = f"{similar_row['5D Return']*100:+.2f}%"
+        else:
+            return_str = "N/A"
         
-        result += "\n"
+        result += f"| {i} | {ticker_val} | {company} | {similarity_score:.1f}% | {pe} | {beta} | {mcap} | {sector} | {return_str} |\n"
     
-    result += "\n_Note: Similarity is calculated based on P/E ratio, Beta, Market Cap, and Sector using K-Nearest Neighbors algorithm._"
+    result += "\n_Note: Similarity is calculated based on P/E ratio, Beta, Market Cap, and Sector using K-Nearest Neighbors algorithm. Returns shown are 5-day returns from earnings date._"
     
     return result
 
