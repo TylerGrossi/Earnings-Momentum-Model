@@ -52,9 +52,18 @@ def format_value(value, decimals=2):
 def _get_stock_history(ticker, start_date_str, end_date_str):
     """Helper function to fetch stock history with caching."""
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(start=start_date_str, end=end_date_str)
-        return hist
+        # Use yf.download() which works better on cloud servers
+        hist = yf.download(
+            ticker, 
+            start=start_date_str, 
+            end=end_date_str, 
+            progress=False,
+            auto_adjust=True,
+            timeout=10
+        )
+        if hist is not None and not hist.empty:
+            return hist
+        return None
     except Exception as e:
         st.write(f"DEBUG _get_stock_history {ticker}: {type(e).__name__}: {e}")
         return None
@@ -63,14 +72,14 @@ def _get_stock_history(ticker, start_date_str, end_date_str):
 def _get_current_price(ticker):
     """Get the current price including after-hours/pre-market."""
     try:
-        stock = yf.Ticker(ticker)
-        # fast_info contains the latest price including extended hours
-        info = stock.fast_info
-        if hasattr(info, 'last_price') and info.last_price:
-            return float(info.last_price)
-        # Fallback to regular market price
-        if hasattr(info, 'previous_close') and info.previous_close:
-            return float(info.previous_close)
+        # Use download with 1d period to get most recent price
+        data = yf.download(ticker, period="1d", progress=False, timeout=10)
+        if data is not None and not data.empty:
+            # Handle both single-level and multi-level columns
+            if 'Close' in data.columns:
+                return float(data['Close'].iloc[-1])
+            elif ('Close', ticker) in data.columns:
+                return float(data[('Close', ticker)].iloc[-1])
         return None
     except Exception as e:
         st.write(f"DEBUG _get_current_price {ticker}: {type(e).__name__}: {e}")
@@ -150,12 +159,22 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
             st.write(f"DEBUG {ticker}: No entry date found. entry_date={entry_date}, hist_dates={hist_dates}")
             return None
         
+        # Handle both single-level and multi-level columns from yf.download()
+        if 'Close' in hist.columns:
+            close_col = hist['Close']
+        elif isinstance(hist.columns, pd.MultiIndex):
+            # Multi-level columns like ('Close', 'AAPL')
+            close_col = hist.xs('Close', axis=1, level=0).iloc[:, 0]
+        else:
+            st.write(f"DEBUG {ticker}: Cannot find Close column. Columns: {hist.columns.tolist()}")
+            return None
+        
         entry_idx = entry_indices[-1]
-        entry_price = float(hist.iloc[entry_idx]['Close'])
+        entry_price = float(close_col.iloc[entry_idx])
         entry_date_actual = hist_dates[entry_idx]
         
         # Get current price: most recent close from history
-        current_price = float(hist['Close'].iloc[-1])
+        current_price = float(close_col.iloc[-1])
         current_date_actual = hist_dates[-1]
         
         # If entry date equals current date, use real-time price (includes after-hours)
