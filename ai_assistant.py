@@ -608,23 +608,20 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     if df.empty:
         return "Could not load data."
     
-    # Filter to only stocks with 5D Return data (completed trades)
-    if '5D Return' in df.columns:
-        df = df[df['5D Return'].notna()].copy()
+    # Filter to most recent entry per ticker (keep all stocks, even without 5D return)
+    df_all = df.sort_values('Earnings Date', ascending=False)
+    df_all = df_all.drop_duplicates(subset=['Ticker'], keep='first')
     
-    if df.empty:
-        return "No stocks with 5D Return data found in the database."
-    
-    # Filter to most recent entry per ticker
-    df = df.sort_values('Earnings Date', ascending=False)
-    df = df.drop_duplicates(subset=['Ticker'], keep='first')
-    
-    # Find the target ticker
-    target_row = df[df['Ticker'].str.upper() == ticker.upper()]
+    # Find the target ticker (can be any stock, even without 5D return)
+    target_row = df_all[df_all['Ticker'].str.upper() == ticker.upper()]
     if target_row.empty:
         return f"Ticker {ticker.upper()} not found in the database."
     
     target_row = target_row.iloc[0]
+    
+    # For KNN comparison, use all stocks with required features
+    # But we'll filter results later to only show stocks with 5D returns
+    df = df_all.copy()
     
     # Prepare features for KNN
     # Features: P/E, Beta, Market Cap (numeric), Sector (encoded)
@@ -705,11 +702,32 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     nbrs.fit(X_scaled)
     
     # Find neighbors (including itself, so we'll exclude it)
-    distances, indices = nbrs.kneighbors([X_scaled[target_pos]])
+    # Use a larger number to account for filtering out stocks without 5D returns
+    max_neighbors = min(n_neighbors * 3, len(X_scaled))  # Get more candidates to filter
+    nbrs_large = NearestNeighbors(n_neighbors=min(max_neighbors + 1, len(X_scaled)), algorithm='auto')
+    nbrs_large.fit(X_scaled)
+    distances, indices = nbrs_large.kneighbors([X_scaled[target_pos]])
     
     # Get similar tickers (exclude the target itself)
-    similar_indices = indices[0][1:]  # Skip first (itself)
-    similar_distances = distances[0][1:]
+    candidate_indices = indices[0][1:]  # Skip first (itself)
+    candidate_distances = distances[0][1:]
+    
+    # Filter to only show stocks with 5D returns in the results
+    similar_indices = []
+    similar_distances = []
+    
+    for idx, dist in zip(candidate_indices, candidate_distances):
+        similar_row = feature_df_valid.iloc[idx]
+        # Only include if it has 5D return data
+        if '5D Return' in similar_row and pd.notna(similar_row['5D Return']):
+            similar_indices.append(idx)
+            similar_distances.append(dist)
+            # Stop once we have enough results
+            if len(similar_indices) >= n_neighbors:
+                break
+    
+    if len(similar_indices) == 0:
+        return f"Found similar stocks to {ticker.upper()}, but none of them have 5D return data available."
     
     # Build result with target stock info
     result = f"## Similar Stocks to {ticker.upper()}\n\n"
