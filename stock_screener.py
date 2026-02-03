@@ -59,6 +59,22 @@ def _get_stock_history(ticker, start_date_str, end_date_str):
         return None
 
 
+def _get_current_price(ticker):
+    """Get the current price including after-hours/pre-market."""
+    try:
+        stock = yf.Ticker(ticker)
+        # fast_info contains the latest price including extended hours
+        info = stock.fast_info
+        if hasattr(info, 'last_price') and info.last_price:
+            return float(info.last_price)
+        # Fallback to regular market price
+        if hasattr(info, 'previous_close') and info.previous_close:
+            return float(info.previous_close)
+        return None
+    except:
+        return None
+
+
 def calculate_return_to_today(ticker, earnings_date, earnings_timing):
     """
     Calculate return from earnings date to today for a reported ticker.
@@ -134,13 +150,17 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         entry_price = float(hist.iloc[entry_idx]['Close'])
         entry_date_actual = hist_dates[entry_idx]
         
-        # Get current price: most recent close
+        # Get current price: most recent close from history
         current_price = float(hist['Close'].iloc[-1])
         current_date_actual = hist_dates[-1]
         
-        # Only calculate return if we have price data AFTER the entry date
-        if current_date_actual <= entry_date_actual:
-            return None
+        # If entry date equals current date, use real-time price (includes after-hours)
+        if current_date_actual == entry_date_actual:
+            realtime_price = _get_current_price(ticker)
+            if realtime_price and realtime_price != entry_price:
+                return_pct = ((realtime_price / entry_price) - 1) * 100
+                return round(return_pct, 2)
+            return 0.0
         
         # Validate prices
         if pd.isna(entry_price) or pd.isna(current_price) or entry_price == 0:
@@ -150,8 +170,7 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         return_pct = ((current_price / entry_price) - 1) * 100
         return round(return_pct, 2)
         
-    except Exception as e:
-        # Return None on any error (silent failure for production)
+    except Exception:
         return None
 
 
