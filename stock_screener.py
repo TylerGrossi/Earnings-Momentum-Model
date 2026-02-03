@@ -48,10 +48,25 @@ def format_value(value, decimals=2):
         return str(value)
 
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes to avoid excessive API calls
+def _get_stock_history(ticker, start_date_str, end_date_str):
+    """Helper function to fetch stock history with caching."""
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(start=start_date_str, end=end_date_str)
+        return hist
+    except:
+        return None
+
+
 def calculate_return_to_today(ticker, earnings_date, earnings_timing):
     """
     Calculate return from earnings date to today for a reported ticker.
-    Simple approach: uses yfinance historical data.
+    Uses yfinance to get historical prices.
+    
+    Entry price logic:
+    - BMO: 4pm ET close on day BEFORE earnings (buy at previous day's close)
+    - AMC: 4pm ET close on earnings day (buy at earnings day's close)
     
     Args:
         ticker: Stock ticker symbol
@@ -86,62 +101,57 @@ def calculate_return_to_today(ticker, earnings_date, earnings_timing):
         else:
             entry_date = earn_date  # Earnings day
         
-        # Get stock data
-        stock = yf.Ticker(ticker)
-        
-        # Calculate days between entry_date and today
+        # Get current date
         today = datetime.now(MARKET_TZ).date()
-        days_diff = (today - entry_date).days
         
-        # Only need data from entry_date onwards (plus small buffer to ensure we get entry_date)
-        # Start a few days before entry_date to account for weekends/holidays, end today
-        start_date = entry_date - timedelta(days=5)  # Small buffer to ensure we get entry_date
-        end_date = today + timedelta(days=1)  # Include today
+        # Fetch historical data: start a few days before entry_date to account for weekends/holidays
+        # Use string format for dates which yfinance handles well
+        start_date_str = (entry_date - timedelta(days=10)).strftime('%Y-%m-%d')
+        end_date_str = (today + timedelta(days=1)).strftime('%Y-%m-%d')
         
-        # Get minimal historical data needed
-        try:
-            hist = stock.history(start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
-        except:
-            # Fallback: if date range fails, try period (but use minimal period)
-            try:
-                # Use max of 10 days or actual days difference + buffer
-                period_days = min(max(days_diff + 5, 5), 10)
-                hist = stock.history(period=f"{period_days}d")
-            except:
-                return None
+        # Get historical data (with caching)
+        hist = _get_stock_history(ticker, start_date_str, end_date_str)
         
-        if hist.empty:
+        if hist is None or hist.empty or len(hist) == 0:
             return None
         
-        # Convert index to dates for comparison
-        hist_dates = [pd.Timestamp(idx).date() if hasattr(idx, 'date') else pd.to_datetime(idx).date() for idx in hist.index]
+        # Convert index to date for comparison
+        hist_dates = []
+        for idx in hist.index:
+            if isinstance(idx, pd.Timestamp):
+                hist_dates.append(idx.date())
+            elif hasattr(idx, 'date'):
+                hist_dates.append(idx.date())
+            else:
+                hist_dates.append(pd.to_datetime(idx).date())
         
-        # Find entry price (close price at 4pm ET on entry_date - this is the buy price)
-        # Get the last trading day on or before entry_date
+        # Find entry price: last trading day on or before entry_date
         entry_indices = [i for i, d in enumerate(hist_dates) if d <= entry_date]
         if not entry_indices:
             return None
         
-        entry_price = hist.iloc[entry_indices[-1]]['Close']  # 4pm close on entry_date
-        entry_date_actual = hist_dates[entry_indices[-1]]
+        entry_idx = entry_indices[-1]
+        entry_price = float(hist.iloc[entry_idx]['Close'])
+        entry_date_actual = hist_dates[entry_idx]
         
-        # Get current price (most recent close from history - today's 4pm close or most recent)
-        current_price = hist['Close'].iloc[-1]
+        # Get current price: most recent close
+        current_price = float(hist['Close'].iloc[-1])
         current_date_actual = hist_dates[-1]
         
         # Only calculate return if we have price data AFTER the entry date
-        # (need at least one trading day after entry to have a return)
         if current_date_actual <= entry_date_actual:
             return None
         
-        # Calculate return from entry price (4pm ET on entry_date) to current price
+        # Validate prices
         if pd.isna(entry_price) or pd.isna(current_price) or entry_price == 0:
             return None
         
+        # Calculate return percentage
         return_pct = ((current_price / entry_price) - 1) * 100
         return round(return_pct, 2)
         
-    except Exception:
+    except Exception as e:
+        # Return None on any error (silent failure for production)
         return None
 
 
