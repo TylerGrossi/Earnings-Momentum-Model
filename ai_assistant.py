@@ -34,12 +34,41 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+# yfinance for reliable current/latest prices in Returns table
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+
+# Win probability model for Returns table
+try:
+    from win_probability_predictor import train_win_probability_model, predict_batch
+    WIN_PROB_AVAILABLE = True
+except ImportError:
+    WIN_PROB_AVAILABLE = False
+
 # Try to import dotenv for .env file support
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass  # dotenv not required
+
+# Market timezone for "reported" cutoff (match stock_screener.py)
+try:
+    from zoneinfo import ZoneInfo
+    MARKET_TZ = ZoneInfo("America/New_York")
+except ImportError:
+    try:
+        from backports.zoneinfo import ZoneInfo
+        MARKET_TZ = ZoneInfo("America/New_York")
+    except ImportError:
+        try:
+            import pytz
+            MARKET_TZ = pytz.timezone("America/New_York")
+        except ImportError:
+            MARKET_TZ = None  # fallback: use UTC in has_earnings_happened
 
 
 # ------------------------------------
@@ -96,8 +125,64 @@ def get_api_key():
 # DATA FUNCTIONS
 # ------------------------------------
 
+def _earnings_date_only(earnings_date):
+    """Return earnings_date as a date (no time)."""
+    if earnings_date is None:
+        return None
+    return earnings_date.date() if hasattr(earnings_date, "date") else earnings_date
+
+
+def has_earnings_happened(earnings_date, earnings_timing):
+    """
+    True if earnings have already occurred (used to filter "reported" vs "upcoming").
+    Matches stock_screener.py: BMO = reported after 4pm ET day before (or 4pm Monday for Monday BMO);
+    AMC = reported after 4pm ET on earnings day.
+    """
+    if earnings_date is None or MARKET_TZ is None:
+        return False
+    now_et = datetime.now(MARKET_TZ)
+    today = now_et.date()
+    current_hour = now_et.hour
+    market_close_hour = 16
+    earn_date = _earnings_date_only(earnings_date)
+    timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
+
+    if "BMO" in timing:
+        if earn_date.weekday() == 0:  # Monday BMO: reported after 4pm Monday
+            if today > earn_date:
+                return True
+            if today == earn_date and current_hour >= market_close_hour:
+                return True
+            return False
+        cutoff_date = earn_date - timedelta(days=1)
+        if today > cutoff_date:
+            return True
+        if today == cutoff_date and current_hour >= market_close_hour:
+            return True
+        return False
+    else:
+        if today > earn_date:
+            return True
+        if today == earn_date and current_hour >= market_close_hour:
+            return True
+        return False
+
+
 def load_returns_data():
-    """Load returns tracker data from GitHub or local."""
+    """Load returns tracker data from local file first, then GitHub."""
+    # Try local returns_tracker.csv first (script dir or cwd)
+    for base in [os.path.dirname(os.path.abspath(__file__)), os.getcwd()]:
+        local_path = os.path.join(base, "returns_tracker.csv")
+        if os.path.isfile(local_path):
+            try:
+                df = pd.read_csv(local_path)
+                if not df.empty:
+                    if '1D Return' not in df.columns and 'Price' in df.columns:
+                        pass  # still valid for returns-this-week
+                    df['Earnings Date'] = pd.to_datetime(df['Earnings Date'], errors='coerce')
+                    return df
+            except Exception:
+                pass
     urls = [
         "https://raw.githubusercontent.com/TylerGrossi/Scrapper/main/returns_tracker.csv",
         "https://raw.githubusercontent.com/TylerGrossi/Scrapper/master/returns_tracker.csv",
@@ -108,7 +193,7 @@ def load_returns_data():
             if not df.empty and '1D Return' in df.columns:
                 df['Earnings Date'] = pd.to_datetime(df['Earnings Date'], errors='coerce')
                 return df
-        except:
+        except Exception:
             continue
     return pd.DataFrame()
 
@@ -213,6 +298,266 @@ def get_earnings_this_week() -> str:
         result += f"  - Entry Price: ${price}\n"
         result += f"  - Status: {date_check}\n\n"
     
+    return result
+
+
+def _best_available_return(row, entry_f):
+    """
+    Return (current_price, return_pct) using best available: Return to Today, then 1D..5D.
+    entry_f is the entry price (float). Returns (current_str, ret_str) for table cells.
+    """
+    if entry_f is None:
+        return "—", "—"
+    # Prefer Return to Today
+    for col in ["Return to Today", "1D Return", "2D Return", "3D Return", "4D Return", "5D Return"]:
+        if col not in row or pd.isna(row.get(col)):
+            continue
+        try:
+            r = float(row[col])
+        except (TypeError, ValueError):
+            continue
+        current_f = entry_f * (1 + r)
+        pct = r * 100
+        ret_str = f"{pct:+.2f}%" if pct >= 0 else f"{pct:.2f}%"
+        return f"${current_f:.2f}", ret_str
+    return "—", "—"
+
+
+def _fetch_current_prices_yfinance(tickers):
+    """
+    Fetch current or latest closing price for each ticker via yfinance.
+    Returns dict mapping ticker (uppercase) -> price (float). Uses latest available close.
+    """
+    if not tickers or not YFINANCE_AVAILABLE:
+        return {}
+    result = {}
+    for t in tickers:
+        sym = str(t).strip().upper()
+        if not sym:
+            continue
+        try:
+            obj = yf.Ticker(sym)
+            # Prefer last close from history (most reliable); fallback to fast_info
+            hist = obj.history(period="5d", interval="1d", auto_adjust=False)
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                last_close = float(hist["Close"].iloc[-1])
+                if last_close > 0:
+                    result[sym] = last_close
+                    continue
+            info = getattr(obj, "fast_info", None)
+            if info is not None:
+                try:
+                    p = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
+                    if p is not None and float(p) > 0:
+                        result[sym] = float(p)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return result
+
+
+def _fetch_current_prices_gemini(tickers, api_key, model_name=None):
+    """
+    Ask Gemini for current or latest stock prices for the given tickers.
+    Returns dict mapping ticker -> price (float), or {} on failure.
+    """
+    if not tickers or not api_key or not GEMINI_AVAILABLE:
+        return {}
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name or list(AVAILABLE_MODELS.keys())[0])
+        ticker_list = ", ".join(sorted(set(str(t).upper() for t in tickers)))
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        prompt = (
+            f"Today's date is {today_str}. For each US stock ticker below, give the most recent US market "
+            f"closing price in US dollars (regular close, not adjusted for splits). "
+            f"Tickers: {ticker_list}. "
+            f"Return ONLY a valid JSON object: keys = ticker symbols, values = price numbers. "
+            f"No explanation, no markdown. Example: {{\"AAPL\": 225.50, \"AMD\": 198.20}}"
+        )
+        response = model.generate_content(prompt)
+        text = (response.text or "").strip()
+        # Strip markdown code blocks if present
+        if "```" in text:
+            for start in ("```json", "```"):
+                if start in text:
+                    text = text.split(start, 1)[-1]
+            text = text.split("```")[0].strip()
+        data = json.loads(text)
+        result = {}
+        ticker_set = {str(t).upper() for t in tickers}
+        for k, v in data.items():
+            key = str(k).strip().upper()
+            if key not in ticker_set:
+                continue
+            try:
+                val = float(v)
+                if val > 0:
+                    result[key] = val
+            except (TypeError, ValueError):
+                pass
+        return result
+    except Exception:
+        return {}
+
+
+def get_returns_this_week() -> str:
+    """
+    Get returns for tickers that have already reported earnings this week (reported only).
+    Uses same "reported" logic as stock_screener.py (has_earnings_happened). Fills current
+    prices and returns from Gemini when API is available; otherwise tracker data or dash.
+    """
+    df = load_returns_data()
+    if df.empty:
+        return "Could not load returns tracker data."
+
+    today = datetime.today()
+    days_since_sunday = (today.weekday() + 1) % 7
+    week_start = today - timedelta(days=days_since_sunday)
+    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+
+    # This week by date
+    this_week = df[
+        (df["Earnings Date"] >= week_start) & (df["Earnings Date"] <= week_end)
+    ].copy()
+
+    # Only stocks that have already reported (earnings have happened) — same as stock_screener "Reported"
+    reported = []
+    for _, row in this_week.iterrows():
+        ed = row.get("Earnings Date")
+        timing = row.get("Earnings Timing", "")
+        if has_earnings_happened(ed, timing):
+            reported.append(row)
+    if not reported:
+        return (
+            f"No stocks in the tracker have **reported** earnings so far this week "
+            f"({week_start.strftime('%b %d')} - {week_end.strftime('%b %d')}). "
+            "Only tickers whose earnings have already occurred are included."
+        )
+
+    reported_df = pd.DataFrame(reported)
+    count = len(reported_df)
+    week_start_str = week_start.strftime("%B %d")
+    week_end_str = week_end.strftime("%B %d")
+
+    ticker_list = reported_df["Ticker"].tolist()
+    # Prefer yfinance for accurate current/latest prices; fall back to Gemini then tracker
+    yf_prices = _fetch_current_prices_yfinance(ticker_list) if YFINANCE_AVAILABLE else {}
+    gemini_prices = _fetch_current_prices_gemini(ticker_list, get_api_key()) if get_api_key() else {}
+    current_prices = yf_prices if yf_prices else gemini_prices
+    prices_from_yf = bool(yf_prices)
+
+    # Win probabilities from ML model (same as stock_screener)
+    win_probs_display = []
+    if WIN_PROB_AVAILABLE:
+        try:
+            training_df = filter_data(load_returns_data())
+            if training_df is not None and not training_df.empty and len(training_df) >= 10:
+                ml_model, ml_encoders, _ = train_win_probability_model(training_df)
+                stock_data_list = [
+                    {
+                        "P/E": row.get("P/E", "N/A"),
+                        "Beta": row.get("Beta", "N/A"),
+                        "Market Cap": row.get("Market Cap", "N/A"),
+                        "Sector": row.get("Sector", "Unknown"),
+                        "Earnings Timing": row.get("Earnings Timing", "Unknown"),
+                    }
+                    for _, row in reported_df.iterrows()
+                ]
+                win_probs = predict_batch(ml_model, ml_encoders, stock_data_list)
+                win_probs_display = [f"{p:.1%}" if 0 <= p <= 1 else "N/A" for p in win_probs]
+            else:
+                win_probs_display = ["N/A"] * len(reported_df)
+        except Exception:
+            win_probs_display = ["N/A"] * len(reported_df)
+    else:
+        win_probs_display = ["N/A"] * len(reported_df)
+
+    # Lead with table; short summary
+    result = (
+        f"**{count}** stocks have reported earnings so far this week "
+        f"({week_start_str} – {week_end_str}). "
+    )
+    if prices_from_yf:
+        result += "Current prices from market data (yfinance).\n\n"
+    elif current_prices:
+        result += "Current prices from Gemini when available; otherwise tracker.\n\n"
+    else:
+        result += "Returns use tracker data when available (Return to Today or 1D–5D).\n\n"
+    result += "## Returns Summary\n\n"
+    result += (
+        "The **Return** column is price movement from the tracking start to current/latest price. "
+        "Tracking start: BMO = previous day close; AMC = earnings day close (per strategy). "
+    )
+    if prices_from_yf:
+        result += "Current/latest prices from yfinance (last close).\n\n"
+    elif current_prices:
+        result += "Current prices from Gemini API.\n\n"
+    else:
+        result += "Source: tracker when available.\n\n"
+    result += "| Ticker | Reporting Time | Tracking Start (Price) | Current/Latest Price | Return (%) | Win Probability |\n"
+    result += "|--------|----------------|------------------------|----------------------|------------|------------------|\n"
+
+    returns_pct = []
+    for i, (_, row) in enumerate(reported_df.iterrows()):
+        ticker = row.get("Ticker", "N/A")
+        company = row.get("Company Name", "N/A")
+        short_name = (company.split(",")[0].strip() if isinstance(company, str) else str(company)) or ticker
+        ed = pd.to_datetime(row.get("Earnings Date"))
+        date_str = ed.strftime("%b %d") if pd.notna(ed) else "N/A"
+        timing = row.get("Earnings Timing", "N/A")
+        reporting = f"{timing} ({date_str})"
+        entry_price = row.get("Price")
+        entry_f = None
+        if not (pd.isna(entry_price) or entry_price is None):
+            entry_f = float(entry_price)
+        # Tracking start label: BMO = previous day close, AMC = earnings day close (per strategy)
+        timing_upper = str(timing).upper() if pd.notna(timing) else ""
+        if pd.notna(ed) and ed is not None and "BMO" in timing_upper:
+            track_date = ed - timedelta(days=1)
+            track_date_str = track_date.strftime("%b %d")
+        else:
+            track_date_str = date_str
+        entry_str = f"{track_date_str} Close (${entry_f:.2f})" if entry_f is not None else "N/A"
+        # Prefer yfinance (then Gemini) current price; sanity-check Gemini only
+        ticker_key = str(ticker).upper() if ticker else ""
+        use_price = False
+        pct = None
+        if ticker_key in current_prices and entry_f is not None and entry_f > 0:
+            current_f = current_prices[ticker_key]
+            if current_f > 0.01:
+                pct = (current_f - entry_f) / entry_f * 100
+                if prices_from_yf or (-90 <= pct <= 400):  # trust yf; sanity-check Gemini
+                    use_price = True
+        if use_price:
+            current_f = current_prices[ticker_key]
+            pct = (current_f - entry_f) / entry_f * 100
+            current_str = f"${current_f:.2f}"
+            ret_str = f"{pct:+.2f}%" if pct >= 0 else f"{pct:.2f}%"
+            returns_pct.append(pct)
+        else:
+            current_str, ret_str = _best_available_return(row, entry_f)
+            if ret_str and ret_str != "—":
+                try:
+                    returns_pct.append(float(ret_str.replace("%", "").replace("+", "")))
+                except ValueError:
+                    pass
+        win_prob_str = win_probs_display[i] if i < len(win_probs_display) else "N/A"
+        result += f"| {ticker} ({short_name}) | {reporting} | {entry_str} | {current_str} | {ret_str} | {win_prob_str} |\n"
+
+    if returns_pct:
+        total_return = sum(returns_pct)
+        avg_return = total_return / len(returns_pct)
+        result += "\n**Total return:** " + f"{total_return:+.2f}%"
+        result += " | **Average return:** " + f"{avg_return:+.2f}%\n\n"
+    else:
+        result += "\n"
+
+    result += (
+        "For a specific ticker's full post-earnings breakdown (1D–5D), ask for that ticker by name."
+    )
     return result
 
 
@@ -1289,12 +1634,13 @@ You have access to the following tools:
 2. **scan_live_signals** - LIVE SCANNER: Scans Finviz and Barchart RIGHT NOW to find stocks currently meeting entry criteria
 3. **get_earnings_this_week** - Lists stocks that HAD earnings this week from the tracker (historical)
 4. **get_stock_details(ticker)** - Gets full details for a specific stock's HISTORICAL trade
-5. **get_strategy_performance** - Returns overall historical performance metrics
-6. **get_risk_metrics** - Returns detailed risk analysis: drawdowns, volatility, worst trades, profit factor, streaks
-7. **analyze_by_filter(filter_type, filter_value)** - Analyze performance filtered by: market_cap, sector, beta, timing
-8. **run_backtest(stop_loss_pct, holding_days)** - Runs a backtest with custom parameters
-9. **compare_stop_losses** - Compares stop loss levels from -2% to -20%
-10. **get_beat_miss_analysis** - Analyzes historical performance by earnings beat vs miss
+5. **get_returns_this_week** - Returns for tickers that have ALREADY REPORTED earnings this week only (same "Reported" logic as stock_screener). Returns a markdown response that INCLUDES a Returns Summary TABLE with columns: Ticker, Reporting Time, Tracking Start (Price), Current/Latest Price, Return (%). Always present that table in your response when you call this tool. Uses tracker data only (no yfinance).
+6. **get_strategy_performance** - Returns overall historical performance metrics
+7. **get_risk_metrics** - Returns detailed risk analysis: drawdowns, volatility, worst trades, profit factor, streaks
+8. **analyze_by_filter(filter_type, filter_value)** - Analyze performance filtered by: market_cap, sector, beta, timing
+9. **run_backtest(stop_loss_pct, holding_days)** - Runs a backtest with custom parameters
+10. **compare_stop_losses** - Compares stop loss levels from -2% to -20%
+11. **get_beat_miss_analysis** - Analyzes historical performance by earnings beat vs miss
 11. **list_all_tickers** - Lists all tickers in the database
 12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Returns a MARKDOWN TABLE with columns: Rank, Ticker, Company, Similarity, P/E, Beta, Market Cap, Sector, 5D Return. When user asks for "table of returns", present this table as-is. Example: find_similar_tickers(AAPL, 5)
 
@@ -1309,6 +1655,7 @@ IMPORTANT TOOL SELECTION:
 - "What are the risks?" or "Risk factors" -> Use get_risk_metrics()
 - Questions about market cap, sector, beta, or timing filters -> Use analyze_by_filter()
 - "Tell me about [ticker]" -> Use get_stock_details(ticker)
+- "Returns on tickers that reported earnings this week" or "returns this week" or "returns for tickers that have reported this week" -> Use get_returns_this_week()
 - "Find similar stocks to [ticker]" or "What stocks are similar to [ticker]?" -> Use find_similar_tickers(ticker)
 
 Examples:
@@ -1320,6 +1667,7 @@ Examples:
 - "How do high beta stocks perform?" -> TOOL_CALL: analyze_by_filter(beta, above 1.5)
 - "BMO vs AMC performance" -> TOOL_CALL: analyze_by_filter(timing, BMO)
 - "Tell me about KSS" -> TOOL_CALL: get_stock_details(KSS)
+- "Give me the returns on the tickers that have reported earnings this week" or "returns for stocks that reported so far this week" -> TOOL_CALL: get_returns_this_week(). You MUST include the Returns Summary table from the tool result in your response.
 - "What's the win rate?" -> TOOL_CALL: get_strategy_performance()
 - "Test with 15% stop loss" -> TOOL_CALL: run_backtest(-15, 5)
 - "Find similar stocks to AAPL" -> TOOL_CALL: find_similar_tickers(AAPL, 5)
@@ -1367,6 +1715,8 @@ def execute_tool_call(tool_call: str) -> str:
             return get_strategy_rules()
         elif tool_name == 'get_earnings_this_week':
             return get_earnings_this_week()
+        elif tool_name == 'get_returns_this_week':
+            return get_returns_this_week()
         elif tool_name == 'scan_live_signals':
             return scan_live_signals()
         elif tool_name == 'get_risk_metrics':
