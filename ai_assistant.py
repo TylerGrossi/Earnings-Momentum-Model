@@ -729,29 +729,45 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     if len(similar_indices) == 0:
         return f"Found similar stocks to {ticker.upper()}, but none of them have 5D return data available."
     
-    # Build result with target stock info
+    # Calculate max distance for normalization (use the largest distance found)
+    max_dist = max(similar_distances) if similar_distances else 1.0
+    
+    # Build result header
     result = f"## Similar Stocks to {ticker.upper()}\n\n"
-    result += f"**Target Stock:** {target_row.get('Ticker', 'N/A')} - {target_row.get('Company Name', 'N/A')}\n"
-    result += f"- P/E: {target_row.get('P/E', 'N/A')}\n"
-    result += f"- Beta: {target_row.get('Beta', 'N/A')}\n"
-    result += f"- Market Cap: {target_row.get('Market Cap', 'N/A')}\n"
-    result += f"- Sector: {target_row.get('Sector', 'N/A')}\n"
-    
-    # Add target's 5D return if available
-    if '5D Return' in target_row and pd.notna(target_row['5D Return']):
-        result += f"- 5D Return: {target_row['5D Return']*100:+.2f}%\n"
-    
-    result += "\n"
-    result += f"**Top {len(similar_indices)} Most Similar Stocks:**\n\n"
     
     # Create table header
     result += "| Rank | Ticker | Company | Similarity | P/E | Beta | Market Cap | Sector | 5D Return |\n"
     result += "|------|--------|---------|------------|-----|------|------------|--------|-----------|\n"
     
+    # Add target ticker as first row (reference row)
+    target_ticker_val = target_row.get('Ticker', 'N/A')
+    target_company = target_row.get('Company Name', 'N/A')
+    target_pe = target_row.get('P/E', 'N/A')
+    target_beta = target_row.get('Beta', 'N/A')
+    target_mcap = target_row.get('Market Cap', 'N/A')
+    target_sector = target_row.get('Sector', 'N/A')
+    
+    # Format target's 5D return
+    if '5D Return' in target_row and pd.notna(target_row['5D Return']):
+        target_return_str = f"{target_row['5D Return']*100:+.2f}%"
+    else:
+        target_return_str = "N/A"
+    
+    # Add target as reference row (Rank 0 or "Reference")
+    result += f"| **Reference** | **{target_ticker_val}** | **{target_company}** | **100.0%** | {target_pe} | {target_beta} | {target_mcap} | {target_sector} | {target_return_str} |\n"
+    
     # Add rows for similar stocks
     for i, (idx, dist) in enumerate(zip(similar_indices, similar_distances), 1):
         similar_row = feature_df_valid.iloc[idx]
-        similarity_score = (1 - dist) * 100  # Convert distance to similarity percentage
+        
+        # Normalize similarity score: convert distance to similarity percentage
+        # Use inverse distance normalized by max distance, then scale to 0-100%
+        # Formula: similarity = (1 - (dist / max_dist)) * 100
+        # This ensures scores are always positive and higher = more similar
+        if max_dist > 0:
+            similarity_score = (1 - (dist / max_dist)) * 100
+        else:
+            similarity_score = 100.0
         
         ticker_val = similar_row['Ticker']
         company = similar_row.get('Company Name', 'N/A')
@@ -768,7 +784,11 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
         
         result += f"| {i} | {ticker_val} | {company} | {similarity_score:.1f}% | {pe} | {beta} | {mcap} | {sector} | {return_str} |\n"
     
-    result += "\n_Note: Similarity is calculated based on P/E ratio, Beta, Market Cap, and Sector using K-Nearest Neighbors algorithm. Returns shown are 5-day returns from earnings date._"
+    result += "\n**Similarity Score Explanation:**\n"
+    result += "- The similarity score measures how similar each stock is to the reference stock (100%) based on financial metrics.\n"
+    result += "- Scores range from 0% to 100%, where 100% = identical to reference stock, and lower scores = less similar.\n"
+    result += "- Similarity is calculated using K-Nearest Neighbors algorithm comparing P/E ratio, Beta, Market Cap, and Sector.\n"
+    result += "- Returns shown are 5-day returns from earnings date.\n"
     
     return result
 
