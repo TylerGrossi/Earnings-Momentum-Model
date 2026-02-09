@@ -156,7 +156,7 @@ def render_stock_screener_tab(raw_returns_df):
                     ml_model, ml_encoders, ml_metrics = train_win_probability_model(training_df)
                     ml_available = True
                 except Exception as e:
-                    st.warning(f"Could not train ML model: {str(e)}")
+                    st.warning(f"Could not train Machine Learning model: {str(e)}")
                     ml_available = False
         progress.progress(0.08)
 
@@ -363,7 +363,7 @@ def render_stock_screener_tab(raw_returns_df):
             upcoming_count = len([r for r in all_rows if r['Status'] == "Upcoming"])
             
             # Build dataframe and save to session state so filters work on rerun
-            display_cols = ["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Win Probability", "Status"]
+            display_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Status"]
             df = pd.DataFrame(all_rows)[display_cols].copy()
             df["Earnings Date"] = df["Earnings"].apply(parse_earnings_date)
             df["_win_prob_num"] = df["Win Probability"].apply(
@@ -391,7 +391,7 @@ def _render_screener_results():
     # Sort by earnings date (earliest first); Earnings Date used for sort only, not displayed
     filtered = df.sort_values("Earnings Date", ascending=True)
 
-    show_cols = ["Ticker", "Earnings", "Price", "P/E", "Beta", "Market Cap", "Win Probability", "Status"]
+    show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Status"]
     filtered_display = filtered[[c for c in show_cols if c in filtered.columns]].copy()
 
     st.dataframe(filtered_display, use_container_width=True, hide_index=True, height=525)
@@ -401,7 +401,7 @@ def _render_screener_results():
     ml_metrics = st.session_state.get("screener_ml_metrics")
     if ml_available and ml_metrics is not None:
         st.markdown("---")
-        with st.expander("ML Model Performance (Click to view)"):
+        with st.expander("Machine Learning Model Performance (Click to view)"):
             st.write("**Model Performance:**")
             st.write(f"- Accuracy: {ml_metrics['accuracy']:.1%}")
             st.write(f"- Precision: {ml_metrics['precision']:.1%}")
