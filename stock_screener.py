@@ -382,14 +382,21 @@ def render_stock_screener_tab(raw_returns_df):
         st.caption("Click Find Stocks to scan.")
 
 
+def _earnings_timing_rank(earn_str):
+    """Return sort rank so BMO (0) comes before AMC (1) before unknown (2)."""
+    s = (earn_str or "").upper()
+    return 0 if "BMO" in s else 1 if "AMC" in s else 2
+
+
 def _render_screener_results():
     """Render screener table only (no filters)."""
     if "screener_df" not in st.session_state:
         return
     df = st.session_state.screener_df.copy()
 
-    # Sort by earnings date (earliest first); Earnings Date used for sort only, not displayed
-    filtered = df.sort_values("Earnings Date", ascending=True)
+    # Sort by earnings date (earliest first), then BMO before AMC
+    df["_timing_rank"] = df["Earnings"].apply(_earnings_timing_rank)
+    filtered = df.sort_values(["Earnings Date", "_timing_rank"], ascending=[True, True])
 
     show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Status"]
     filtered_display = filtered[[c for c in show_cols if c in filtered.columns]].copy()
