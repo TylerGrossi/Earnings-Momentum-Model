@@ -2,6 +2,18 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
+# Use Eastern time for "this week" so behavior is consistent on any server (e.g. Streamlit Cloud UTC)
+try:
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+except ImportError:
+    try:
+        from backports.zoneinfo import ZoneInfo
+        ET = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz
+        ET = pytz.timezone("America/New_York")
+
 # ------------------------------------
 # DATA LOADING FUNCTIONS
 # ------------------------------------
@@ -150,24 +162,18 @@ def load_and_filter_all_data():
 # ------------------------------------
 
 def get_this_week_earnings(df):
-    """Get tickers from returns_tracker that had earnings this week (Sunday to Saturday)."""
+    """Get tickers from returns_tracker that had earnings this week (Sunday–Saturday in Eastern time)."""
     if df is None or df.empty:
         return pd.DataFrame()
     
-    # Earnings week runs Sunday to Saturday
-    today = datetime.today()
-    # weekday(): Monday=0, Sunday=6
-    # We want to find the most recent Sunday
-    days_since_sunday = (today.weekday() + 1) % 7  # Sunday=0, Monday=1, ..., Saturday=6
-    week_start = today - timedelta(days=days_since_sunday)
-    week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    # End on Saturday
-    week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
-    
-    # Filter for earnings this week
-    this_week_df = df[
-        (df['Earnings Date'] >= week_start) & 
-        (df['Earnings Date'] <= week_end)
-    ].copy()
-    
-    return this_week_df
+    # Week boundaries in Eastern so behavior is correct on any server (e.g. Streamlit Cloud UTC)
+    now_et = datetime.now(ET)
+    today_et = now_et.date()
+    days_since_sunday = (today_et.weekday() + 1) % 7  # Sun=0, Mon=1, ..., Sat=6
+    week_start_date = today_et - timedelta(days=days_since_sunday)
+    week_end_date = week_start_date + timedelta(days=6)
+    # Compare date parts so timezone of stored Earnings Date doesn't matter
+    ed = pd.to_datetime(df['Earnings Date'], errors='coerce')
+    earn_dates = ed.dt.date if hasattr(ed.dt, 'date') else ed.dt.normalize().dt.date
+    mask = (earn_dates >= week_start_date) & (earn_dates <= week_end_date)
+    return df.loc[mask].copy()

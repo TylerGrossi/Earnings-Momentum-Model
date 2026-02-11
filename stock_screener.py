@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time
 from datetime import datetime, timedelta
 
 try:
@@ -175,12 +176,20 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
     try:
         start = entry_date - timedelta(days=30)
         end = today + timedelta(days=1)
-        hist = yf.Ticker(ticker).history(
-            interval="1d",
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            auto_adjust=True,
-        )
+        start_str = start.strftime("%Y-%m-%d")
+        end_str = end.strftime("%Y-%m-%d")
+        hist = None
+        for attempt in range(2):  # retry once on empty (often 429 rate limit)
+            hist = yf.Ticker(ticker).history(
+                interval="1d",
+                start=start_str,
+                end=end_str,
+                auto_adjust=True,
+            )
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                break
+            if attempt == 0:
+                time.sleep(1.0)  # back off before retry
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
         if hasattr(hist.index, "tz") and hist.index.tz is not None:
@@ -280,6 +289,7 @@ def render_stock_screener_tab(raw_returns_df):
                 open_price = "N/A"
                 current_price = "N/A"
                 if status == "Reported" and yf is not None:
+                    time.sleep(0.5)  # throttle to avoid Yahoo 429 rate limit (e.g. on Streamlit Cloud)
                     result = get_reported_return(ticker, earnings_date, timing)
                     if result is not None:
                         ret, entry_px, curr_px = result
