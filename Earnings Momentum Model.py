@@ -802,6 +802,8 @@ def export_hourly_prices(udf, days_after=5):
     print(f"   Range: {days_after} trading days after earnings")
     
     rows = []
+    today_et = datetime.now(MARKET_TZ)
+    today_date = today_et.date()
     
     for _, r in valid.iterrows():
         t = r["Ticker"]
@@ -811,23 +813,40 @@ def export_hourly_prices(udf, days_after=5):
         timing = r.get("Earnings Timing", "")
         
         try:
-            start_date = earnings_date - timedelta(days=7)
-            end_date = earnings_date + timedelta(days=days_after + 5)
+            # Use plain date for range so yfinance and comparisons are consistent
+            if hasattr(earnings_date, 'date'):
+                earn_d = earnings_date.date()
+            else:
+                earn_d = pd.to_datetime(earnings_date).date()
+            start_date = earn_d - timedelta(days=7)
+            end_date = earn_d + timedelta(days=days_after + 5)
+            # Cap end to today + 1 so we don't request future dates
+            if end_date > today_date:
+                end_date = today_date + timedelta(days=1)
             
-            today = datetime.now(MARKET_TZ)
-            if end_date > today:
-                end_date = today + timedelta(days=1)
+            start_str = start_date.strftime('%Y-%m-%d')
+            end_str = end_date.strftime('%Y-%m-%d')
             
-            print(f"   {t}: Downloading hourly data...")
+            print(f"   {t}: Downloading hourly data ({start_str} to {end_str})...")
             
             ticker_obj = yf.Ticker(t)
-            hourly_data = ticker_obj.history(
-                start=start_date.strftime('%Y-%m-%d'),
-                end=end_date.strftime('%Y-%m-%d'),
-                interval="1h"
-            )
+            hourly_data = None
+            for attempt in range(3):
+                try:
+                    hourly_data = ticker_obj.history(
+                        start=start_str,
+                        end=end_str,
+                        interval="1h"
+                    )
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        print(f"      Retry {attempt + 1}/2 in 2s: {e}")
+                        time.sleep(2)
+                    else:
+                        raise
             
-            if hourly_data.empty:
+            if hourly_data is None or hourly_data.empty:
                 print(f"      No hourly data available")
                 continue
             
@@ -839,29 +858,26 @@ def export_hourly_prices(udf, days_after=5):
             
             prices.index = prices.index.tz_localize(None)
             
-            earnings_dt = pd.Timestamp(earnings_date).tz_localize(None)
-            earnings_day = earnings_dt.date()
-            
             if timing == "BMO":
-                base_prices = prices[prices.index.date < earnings_day]
+                base_prices = prices[prices.index.date < earn_d]
                 if base_prices.empty:
                     print(f"      No base price found for BMO")
                     continue
                 base_price = base_prices.iloc[-1]
                 base_time = base_prices.index[-1]
-                track_start = prices[prices.index.date >= earnings_day]
+                track_start = prices[prices.index.date >= earn_d]
                 if track_start.empty:
                     print(f"      No tracking data for BMO")
                     continue
                 track_start_time = track_start.index[0]
             else:
-                day_prices = prices[prices.index.date == earnings_day]
+                day_prices = prices[prices.index.date == earn_d]
                 if day_prices.empty:
                     print(f"      No base price found for AMC")
                     continue
                 base_price = day_prices.iloc[-1]
                 base_time = day_prices.index[-1]
-                track_start = prices[prices.index.date > earnings_day]
+                track_start = prices[prices.index.date > earn_d]
                 if track_start.empty:
                     print(f"      No tracking data for AMC")
                     continue
@@ -916,7 +932,7 @@ def export_hourly_prices(udf, days_after=5):
                     "Time": dt.strftime("%H:%M"),
                     "Hour": dt.hour,
                     "Close": round(close_price, 2),
-                    "Earnings Date": earnings_date.date() if hasattr(earnings_date, 'date') else earnings_date,
+                    "Earnings Date": earn_d,
                     "Earnings Timing": timing,
                     "Base Price": round(base_price, 2),
                     "Hours From Earnings": round(hours_from_earnings, 1),
@@ -964,8 +980,15 @@ if __name__ == "__main__":
     # Step 2: Update returns tracker with new data + calculate returns
     returns_df = update_returns(new_rows)
     
-    # Step 3: Export hourly prices for PowerBI
-    export_hourly_prices(returns_df, days_after=5)
+    # Step 3: Export hourly prices for PowerBI (use full tracker so hourly updates even when no new tickers)
+    if returns_df is None or returns_df.empty:
+        if os.path.exists(RETURNS_FILE):
+            returns_df = pd.read_csv(RETURNS_FILE)
+            returns_df["Earnings Date"] = normalize_tz(returns_df["Earnings Date"])
+    if returns_df is not None and not returns_df.empty:
+        export_hourly_prices(returns_df, days_after=5)
+    else:
+        print("\n⚠️ No returns data available; skipping hourly export.")
     
     print("\n" + "=" * 60)
     print("COMPLETE")

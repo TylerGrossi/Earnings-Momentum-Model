@@ -141,14 +141,26 @@ def run_trading(dry_run: bool):
     from alpaca.trading.enums import OrderSide, TimeInForce
 
     validate_config()
-    client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=PAPER)
+    try:
+        client = TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=PAPER)
+        account = client.get_account()
+        equity = float(account.equity or 0)
+    except Exception as e:
+        err = str(e).lower()
+        if "401" in err or "unauthorized" in err:
+            print("Alpaca returned 401 Unauthorized — your API key or secret is invalid or wrong environment.")
+            print("  • PAPER=true requires Paper Trading keys from https://app.alpaca.markets (switch to 'Paper Trading' at top).")
+            print("  • Paper keys often start with 'PK'. Live keys are different; don't mix them.")
+            print("  • In .streamlit/secrets.toml: no extra spaces, no quotes inside the value.")
+            print("  • Try regenerating the key pair in the Alpaca dashboard and pasting the new key and secret.")
+        raise SystemExit(1) from e
+
     signals = get_todays_buy_list()
 
     if not signals:
         print("No buy signals for today. Ensure returns_tracker.csv is up to date and today is an entry day.")
         return
 
-    equity = float(client.get_account().equity or 0)
     per_position = FIXED_DOLLARS if FIXED_DOLLARS else equity * POSITION_FRACTION
 
     mode = "DRY RUN" if dry_run else "LIVE"
@@ -235,7 +247,13 @@ def run_scheduler(live: bool):
         try:
             run_trading(dry_run=dry_run)
         except Exception as e:
-            print(f"Scheduled run error: {e}")
+            err = str(e).lower()
+            if "unauthorized" in err or "401" in err:
+                print("Scheduled run error: Alpaca rejected the request (unauthorized).")
+                print("  → Check .streamlit/secrets.toml: use real API key & secret from https://app.alpaca.markets")
+                print("  → For PAPER=true use Paper Trading keys, not Live keys.")
+            else:
+                print(f"Scheduled run error: {e}")
         print("--- Next run at 3:55 PM ET tomorrow ---\n")
 
 
