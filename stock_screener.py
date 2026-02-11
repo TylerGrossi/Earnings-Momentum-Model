@@ -1,4 +1,5 @@
 import io
+import logging
 import streamlit as st
 import pandas as pd
 import time
@@ -10,12 +11,11 @@ try:
 except ImportError:
     yf = None
 
-# Handle zoneinfo import (built-in Python 3.9+, fallback for older versions)
+# Eastern time (EST/EDT) for market hours — America/New_York is the correct US Eastern zone
 try:
     from zoneinfo import ZoneInfo
     MARKET_TZ = ZoneInfo("America/New_York")
 except ImportError:
-    # Fallback for older Python versions
     try:
         from backports.zoneinfo import ZoneInfo
         MARKET_TZ = ZoneInfo("America/New_York")
@@ -74,12 +74,12 @@ def is_past_entry_deadline(earnings_date, earnings_timing):
     now_et = datetime.now(MARKET_TZ)
     today = now_et.date()
     hour = now_et.hour
-    market_close_hour = 16  # 4pm ET
+    market_close_hour = 16  # 4pm EST
     earn_date = _earnings_date_only(earnings_date)
     timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
 
     if "BMO" in timing:
-        # Entry was 4pm day before earnings
+        # Entry was 4pm EST day before earnings
         entry_date = earn_date - timedelta(days=1)
         if today > entry_date:
             return True
@@ -113,7 +113,7 @@ def has_earnings_happened(earnings_date, earnings_timing):
     now_et = datetime.now(MARKET_TZ)
     today = now_et.date()
     current_hour = now_et.hour
-    market_close_hour = 16  # 4pm ET
+    market_close_hour = 16  # 4pm EST
     earn_date = _earnings_date_only(earnings_date)
     timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
 
@@ -141,7 +141,7 @@ def has_earnings_happened(earnings_date, earnings_timing):
 
 def _entry_date_for_return(earnings_date, earnings_timing):
     """
-    Date whose 4pm ET close we use as entry price.
+    Date whose 4pm EST close we use as entry price.
     BMO: day before earnings; AMC: day of earnings.
     If that date is weekend, use previous Friday.
     """
@@ -163,7 +163,7 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
     """
     Return (return_pct, entry_price, current_price) for reported earnings.
     return_pct = (current - entry) / entry as decimal (e.g. 0.05 for 5%).
-    Entry = close on entry_date (4pm = daily close; BMO = day before earnings, AMC = day of).
+    Entry = close on entry_date (4pm EST = daily close; BMO = day before earnings, AMC = day of).
     Uses yfinance daily data. Returns None on error or if yfinance unavailable.
     """
     if yf is None:
@@ -171,8 +171,8 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
     entry_date = _entry_date_for_return(earnings_date, earnings_timing)
     if entry_date is None:
         return None
-    now_et = datetime.now(MARKET_TZ)
-    today = now_et.date()
+    now_est = datetime.now(MARKET_TZ)
+    today = now_est.date()
     if entry_date > today:
         return None
     try:
@@ -180,27 +180,48 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
         end = today + timedelta(days=1)
         start_str = start.strftime("%Y-%m-%d")
         end_str = end.strftime("%Y-%m-%d")
-        hist = None
-        for attempt in range(2):  # retry once on empty (often 429 rate limit)
-            with redirect_stderr(io.StringIO()):  # suppress yfinance "Failed to get ticker" / "No timezone found"
-                hist = yf.Ticker(ticker).history(
-                    interval="1d",
-                    start=start_str,
-                    end=end_str,
-                    auto_adjust=True,
-                )
-            if hist is not None and not hist.empty and "Close" in hist.columns:
-                break
-            if attempt == 0:
-                time.sleep(1.0)  # back off before retry
+        # Suppress yfinance "Failed to get ticker" / "No timezone found" (stderr + logging)
+        yf_log = logging.getLogger("yfinance")
+        old_level = yf_log.level
+        yf_log.setLevel(logging.CRITICAL)
+        if getattr(yf, "config", None) is not None and hasattr(yf.config, "debug"):
+            try:
+                old_logging = getattr(yf.config.debug, "logging", True)
+                yf.config.debug.logging = False
+            except Exception:
+                old_logging = True
+        else:
+            old_logging = True
+        try:
+            hist = None
+            for attempt in range(2):  # retry once on empty (often 429 rate limit)
+                with redirect_stderr(io.StringIO()):
+                    hist = yf.Ticker(ticker).history(
+                        interval="1d",
+                        start=start_str,
+                        end=end_str,
+                        auto_adjust=True,
+                    )
+                if hist is not None and not hist.empty and "Close" in hist.columns:
+                    break
+                if attempt == 0:
+                    time.sleep(1.0)  # back off before retry
+        finally:
+            yf_log.setLevel(old_level)
+            if getattr(yf, "config", None) is not None and hasattr(yf.config, "debug"):
+                try:
+                    yf.config.debug.logging = old_logging
+                except Exception:
+                    pass
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
+        # Use America/New_York (EST/EDT) for date comparison
         if hasattr(hist.index, "tz") and hist.index.tz is not None:
             try:
-                hist_et = hist.index.tz_convert("America/New_York")
+                hist_est = hist.index.tz_convert("America/New_York")
             except Exception:
-                hist_et = hist.index
-            hist_dates = hist_et.date
+                hist_est = hist.index
+            hist_dates = hist_est.date
         else:
             hist_dates = hist.index.date
         mask = hist_dates <= entry_date
@@ -342,7 +363,7 @@ def render_stock_screener_tab(raw_returns_df):
         
         new_rows = []
         skipped = []
-        today = datetime.now(MARKET_TZ).date()  # Use Eastern Time date
+        today = datetime.now(MARKET_TZ).date()  # Use EST date
         
         for i, t in enumerate(barchart_passed):
             # Skip yfinance calls for tickers already in tracker (avoids 429 and duplicate errors)

@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
-# Use Eastern time for "this week" so behavior is consistent on any server (e.g. Streamlit Cloud UTC)
+# Eastern time (EST/EDT) for "this week" so behavior is consistent on any server (e.g. Streamlit Cloud UTC)
 try:
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("America/New_York")
@@ -162,7 +162,7 @@ def load_and_filter_all_data():
 # ------------------------------------
 
 def get_this_week_earnings(df):
-    """Get tickers from returns_tracker that had earnings this week (Sunday–Saturday in Eastern time)."""
+    """Get tickers from returns_tracker that had earnings this week (Sunday–Saturday in EST)."""
     if df is None or df.empty:
         return pd.DataFrame()
     
