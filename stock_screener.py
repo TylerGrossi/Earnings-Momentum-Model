@@ -23,7 +23,7 @@ except ImportError:
         import pytz
         MARKET_TZ = pytz.timezone("America/New_York")
 
-from utils import get_all_tickers, get_finviz_data, has_buy_signal, get_date_check, earnings_sort_key, parse_earnings_date
+from utils import get_all_tickers, get_finviz_data, has_buy_signal, earnings_sort_key, parse_earnings_date
 from data_loader import get_this_week_earnings
 from win_probability_predictor import train_win_probability_model, predict_batch
 
@@ -215,15 +215,8 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
                     pass
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
-        # Use America/New_York (EST/EDT) for date comparison
-        if hasattr(hist.index, "tz") and hist.index.tz is not None:
-            try:
-                hist_est = hist.index.tz_convert("America/New_York")
-            except Exception:
-                hist_est = hist.index
-            hist_dates = hist_est.date
-        else:
-            hist_dates = hist.index.date
+        # Use index date only (no timezone lookup); daily bars are one per trading day
+        hist_dates = pd.Series(hist.index).dt.date
         mask = hist_dates <= entry_date
         entry_bars = hist.loc[mask]
         if entry_bars.empty:
@@ -245,29 +238,24 @@ def render_stock_screener_tab(raw_returns_df):
     st.markdown("**Criteria:** Earnings this week · SMA20 crossed above SMA50 · Barchart Buy Signal")
     
     if st.button("Find Stocks"):
-        # Single progress bar and status for entire run (Finviz, Barchart, ML training)
+        # Single progress bar and status for entire run
         status_text = st.empty()
         progress = st.progress(0)
 
-        # 1) Train ML model (show in same bar)
-        status_text.text("Training win probability model...")
-        progress.progress(0.02)
-        ml_model = None
-        ml_encoders = None
-        ml_metrics = None
-        ml_available = False
-        if raw_returns_df is not None and not raw_returns_df.empty:
-            training_df = raw_returns_df[raw_returns_df['5D Return'].notna()].copy()
-            if len(training_df) >= 10:
-                try:
-                    ml_model, ml_encoders, ml_metrics = train_win_probability_model(training_df)
-                    ml_available = True
-                except Exception as e:
-                    st.warning(f"Could not train Machine Learning model: {str(e)}")
-                    ml_available = False
-        progress.progress(0.08)
+        # 1) Find stocks: Scan Finviz, then Barchart
+        status_text.text("Scanning Finviz...")
+        progress.progress(0.05)
+        tickers = get_all_tickers()
 
-        # Get tickers already reported this week from returns tracker
+        status_text.text(f"Found {len(tickers)} tickers. Checking Barchart signals...")
+        barchart_passed = []
+        n_t = len(tickers)
+        for i, t in enumerate(tickers):
+            if has_buy_signal(t):
+                barchart_passed.append(t)
+            progress.progress(0.05 + 0.35 * (i + 1) / n_t if n_t else 0.4)
+
+        # 2) Load tracker & fetch returns for reported tickers (need tracked_tickers_this_week before date check)
         this_week_df = get_this_week_earnings(raw_returns_df)
         tracked_tickers = set()
         if raw_returns_df is not None and not raw_returns_df.empty:
@@ -322,7 +310,7 @@ def render_stock_screener_tab(raw_returns_df):
                         return_pct = f"{ret:.1%}"
                         open_price = f"{entry_px:.2f}"
                         current_price = f"{curr_px:.2f}"
-                progress.progress(0.08 + 0.02 * (i + 1) / n_week)
+                progress.progress(0.4 + 0.05 * (i + 1) / n_week)
                 
                 # Get Sector (default to Unknown if not available)
                 sector = row.get('Sector', 'Unknown')
@@ -343,22 +331,9 @@ def render_stock_screener_tab(raw_returns_df):
                     "Open": open_price,
                     "Current": current_price,
                 })
-        
-        # Scan Finviz (same bar)
-        status_text.text("Scanning Finviz...")
-        progress.progress(0.1)
-        tickers = get_all_tickers()
-        
-        # Check Barchart (same bar)
-        status_text.text(f"Found {len(tickers)} tickers. Checking Barchart signals...")
-        barchart_passed = []
-        n_t = len(tickers)
-        for i, t in enumerate(tickers):
-            if has_buy_signal(t):
-                barchart_passed.append(t)
-            progress.progress(0.1 + 0.4 * (i + 1) / n_t if n_t else 0.5)
-        
-        # Check earnings dates (same bar)
+        progress.progress(0.45)
+
+        # 3) Check earnings dates for Finviz/Barchart tickers
         status_text.text(f"{len(barchart_passed)} passed Barchart. Checking dates...")
         
         new_rows = []
@@ -368,12 +343,10 @@ def render_stock_screener_tab(raw_returns_df):
         for i, t in enumerate(barchart_passed):
             # Skip yfinance calls for tickers already in tracker (avoids 429 and duplicate errors)
             if t in tracked_tickers_this_week:
-                progress.progress(0.5 + 0.5 * (i + 1) / len(barchart_passed) if barchart_passed else 1.0)
+                progress.progress(0.45 + 0.45 * (i + 1) / len(barchart_passed) if barchart_passed else 0.9)
                 continue
             data = get_finviz_data(t)
-            date_info = get_date_check(t)
-            
-            # Parse the earnings date and timing from Finviz
+            # Parse the earnings date and timing from Finviz (no yfinance earnings API — avoids 429 / "No earnings dates found")
             earnings_date = None
             earnings_timing = ""
             earnings_str = data.get("Earnings", "")
@@ -383,18 +356,16 @@ def render_stock_screener_tab(raw_returns_df):
                     if len(parts) >= 2:
                         month_day = f"{parts[0]} {parts[1]}"
                         earnings_date = datetime.strptime(f"{month_day} {today.year}", "%b %d %Y").date()
-                        # Check for BMO/AMC in the string
                         if len(parts) >= 3:
                             earnings_timing = parts[2].upper()
-                except:
+                except Exception:
                     pass
-            
-            # Skip conditions for Finviz tickers (not in tracker)
-            # Reported section = only from returns_tracker. We never add a new ticker as "Reported".
-            # Entry: BMO = 4pm day before earnings; AMC = 4pm day of. Past that = too late to add.
-            skip_reason = None
+            # Date check from Finviz only (earnings already passed = DATE PASSED)
+            date_passed = earnings_date is not None and earnings_date < today
 
-            if date_info["Date Check"] == "DATE PASSED":
+            # Skip conditions for Finviz tickers (not in tracker)
+            skip_reason = None
+            if date_passed:
                 skip_reason = "DATE PASSED"
             elif t in tracked_tickers_this_week:
                 skip_reason = "Already in tracker"
@@ -415,18 +386,8 @@ def render_stock_screener_tab(raw_returns_df):
                     })
             else:
                 # Only add tickers the user can still act on. Status is always "Upcoming" for
-                # Finviz-origin rows (Reported only comes from returns_tracker).
+                # Finviz-origin rows. Sector left as Unknown to avoid extra yfinance calls (429).
                 market_cap = data.get("Market Cap", "N/A")
-                sector = 'Unknown'
-                if yf is not None:
-                    try:
-                        ticker_info = yf.Ticker(t).info
-                        sector = ticker_info.get('sector', 'Unknown')
-                        if not sector or sector == '':
-                            sector = 'Unknown'
-                    except Exception:
-                        sector = 'Unknown'
-
                 new_rows.append({
                     "Ticker": t,
                     "Earnings": earnings_str,
@@ -434,7 +395,7 @@ def render_stock_screener_tab(raw_returns_df):
                     "P/E": data.get("P/E", "N/A"),
                     "Beta": data.get("Beta", "N/A"),
                     "Market Cap": market_cap,
-                    "Sector": sector,
+                    "Sector": "Unknown",
                     "Earnings Timing": earnings_timing if earnings_timing else 'Unknown',
                     "Status": "Upcoming",
                     "Return": "N/A",
@@ -442,8 +403,24 @@ def render_stock_screener_tab(raw_returns_df):
                     "Current": "N/A",
                 })
             
-            progress.progress(0.5 + 0.5 * (i + 1) / len(barchart_passed) if barchart_passed else 1.0)
+            progress.progress(0.45 + 0.45 * (i + 1) / len(barchart_passed) if barchart_passed else 0.9)
         
+        # 4) Train win probability model (uses historical returns, not current run)
+        status_text.text("Training win probability model...")
+        progress.progress(0.92)
+        ml_model = None
+        ml_encoders = None
+        ml_metrics = None
+        ml_available = False
+        if raw_returns_df is not None and not raw_returns_df.empty:
+            training_df = raw_returns_df[raw_returns_df['5D Return'].notna()].copy()
+            if len(training_df) >= 10:
+                try:
+                    ml_model, ml_encoders, ml_metrics = train_win_probability_model(training_df)
+                    ml_available = True
+                except Exception as e:
+                    st.warning(f"Could not train Machine Learning model: {str(e)}")
+                    ml_available = False
         progress.progress(1.0)
         progress.empty()
         status_text.empty()
