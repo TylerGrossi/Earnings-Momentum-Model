@@ -2,6 +2,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+
 # Handle zoneinfo import (built-in Python 3.9+, fallback for older versions)
 try:
     from zoneinfo import ZoneInfo
@@ -131,6 +136,75 @@ def has_earnings_happened(earnings_date, earnings_timing):
         return False
 
 
+def _entry_date_for_return(earnings_date, earnings_timing):
+    """
+    Date whose 4pm ET close we use as entry price.
+    BMO: day before earnings; AMC: day of earnings.
+    If that date is weekend, use previous Friday.
+    """
+    if earnings_date is None:
+        return None
+    earn_date = _earnings_date_only(earnings_date)
+    timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
+    if "BMO" in timing:
+        entry_date = earn_date - timedelta(days=1)
+    else:
+        entry_date = earn_date
+    # If weekend, use previous Friday
+    while entry_date.weekday() >= 5:
+        entry_date -= timedelta(days=1)
+    return entry_date
+
+
+def get_reported_return(ticker, earnings_date, earnings_timing):
+    """
+    Return (return_pct, entry_price, current_price) for reported earnings.
+    return_pct = (current - entry) / entry as decimal (e.g. 0.05 for 5%).
+    Entry = close on entry_date (4pm = daily close; BMO = day before earnings, AMC = day of).
+    Uses yfinance daily data. Returns None on error or if yfinance unavailable.
+    """
+    if yf is None:
+        return None
+    entry_date = _entry_date_for_return(earnings_date, earnings_timing)
+    if entry_date is None:
+        return None
+    now_et = datetime.now(MARKET_TZ)
+    today = now_et.date()
+    if entry_date > today:
+        return None
+    try:
+        start = entry_date - timedelta(days=30)
+        end = today + timedelta(days=1)
+        hist = yf.Ticker(ticker).history(
+            interval="1d",
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            auto_adjust=True,
+        )
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            return None
+        if hasattr(hist.index, "tz") and hist.index.tz is not None:
+            try:
+                hist_et = hist.index.tz_convert("America/New_York")
+            except Exception:
+                hist_et = hist.index
+            hist_dates = hist_et.date
+        else:
+            hist_dates = hist.index.date
+        mask = hist_dates <= entry_date
+        entry_bars = hist.loc[mask]
+        if entry_bars.empty:
+            return None
+        entry_price = float(entry_bars["Close"].iloc[-1])
+        current_price = float(hist["Close"].iloc[-1])
+        if entry_price <= 0:
+            return None
+        ret_pct = (current_price - entry_price) / entry_price
+        return (ret_pct, entry_price, current_price)
+    except Exception:
+        return None
+
+
 def render_stock_screener_tab(raw_returns_df):
     """Render the Stock Screener tab."""
     
@@ -201,6 +275,18 @@ def render_stock_screener_tab(raw_returns_df):
                 # Determine status based on whether earnings have actually happened
                 status = "Reported" if has_earnings_happened(earnings_date, timing) else "Upcoming"
                 
+                # Reported return from yfinance (entry = 4pm close on entry date, current = latest)
+                return_pct = "N/A"
+                open_price = "N/A"
+                current_price = "N/A"
+                if status == "Reported" and yf is not None:
+                    result = get_reported_return(ticker, earnings_date, timing)
+                    if result is not None:
+                        ret, entry_px, curr_px = result
+                        return_pct = f"{ret:.1%}"
+                        open_price = f"{entry_px:.2f}"
+                        current_price = f"{curr_px:.2f}"
+                
                 # Get Sector (default to Unknown if not available)
                 sector = row.get('Sector', 'Unknown')
                 if pd.isna(sector) or sector == '':
@@ -215,7 +301,10 @@ def render_stock_screener_tab(raw_returns_df):
                     "Market Cap": format_market_cap(row.get('Market Cap')),
                     "Sector": sector,
                     "Earnings Timing": timing if pd.notna(timing) else 'Unknown',
-                    "Status": status
+                    "Status": status,
+                    "Return": return_pct,
+                    "Open": open_price,
+                    "Current": current_price,
                 })
         
         # Scan Finviz (same bar)
@@ -288,14 +377,14 @@ def render_stock_screener_tab(raw_returns_df):
                 # Finviz-origin rows (Reported only comes from returns_tracker).
                 market_cap = data.get("Market Cap", "N/A")
                 sector = 'Unknown'
-                try:
-                    import yfinance as yf
-                    ticker_info = yf.Ticker(t).info
-                    sector = ticker_info.get('sector', 'Unknown')
-                    if not sector or sector == '':
+                if yf is not None:
+                    try:
+                        ticker_info = yf.Ticker(t).info
+                        sector = ticker_info.get('sector', 'Unknown')
+                        if not sector or sector == '':
+                            sector = 'Unknown'
+                    except Exception:
                         sector = 'Unknown'
-                except Exception:
-                    sector = 'Unknown'
 
                 new_rows.append({
                     "Ticker": t,
@@ -307,6 +396,9 @@ def render_stock_screener_tab(raw_returns_df):
                     "Sector": sector,
                     "Earnings Timing": earnings_timing if earnings_timing else 'Unknown',
                     "Status": "Upcoming",
+                    "Return": "N/A",
+                    "Open": "N/A",
+                    "Current": "N/A",
                 })
             
             progress.progress(0.5 + 0.5 * (i + 1) / len(barchart_passed) if barchart_passed else 1.0)
@@ -363,7 +455,7 @@ def render_stock_screener_tab(raw_returns_df):
             upcoming_count = len([r for r in all_rows if r['Status'] == "Upcoming"])
             
             # Build dataframe and save to session state so filters work on rerun
-            display_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Status"]
+            display_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
             df = pd.DataFrame(all_rows)[display_cols].copy()
             df["Earnings Date"] = df["Earnings"].apply(parse_earnings_date)
             df["_win_prob_num"] = df["Win Probability"].apply(
@@ -388,6 +480,16 @@ def _earnings_timing_rank(earn_str):
     return 0 if "BMO" in s else 1 if "AMC" in s else 2
 
 
+def _parse_return_pct(s):
+    """Parse Return column value to decimal (e.g. '5.2%' -> 0.052). Returns None for N/A."""
+    if pd.isna(s) or s == "N/A" or not s or "%" not in str(s):
+        return None
+    try:
+        return float(str(s).replace("%", "").replace(",", "")) / 100
+    except (ValueError, TypeError):
+        return None
+
+
 def _render_screener_results():
     """Render screener table only (no filters)."""
     if "screener_df" not in st.session_state:
@@ -398,7 +500,16 @@ def _render_screener_results():
     df["_timing_rank"] = df["Earnings"].apply(_earnings_timing_rank)
     filtered = df.sort_values(["Earnings Date", "_timing_rank"], ascending=[True, True])
 
-    show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Status"]
+    # Total return for reported tickers this week (sum of individual returns)
+    reported = filtered[filtered["Status"] == "Reported"]
+    return_vals = reported["Return"].apply(_parse_return_pct) if "Return" in reported.columns else pd.Series(dtype=float)
+    return_vals = return_vals.dropna()
+    if len(return_vals) > 0:
+        total_return = return_vals.sum()
+        n_reported = len(return_vals)
+        st.markdown(f"**Total return (reported this week):** {total_return:.1%} ({n_reported} ticker{'s' if n_reported != 1 else ''})")
+
+    show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
     filtered_display = filtered[[c for c in show_cols if c in filtered.columns]].copy()
 
     st.dataframe(filtered_display, use_container_width=True, hide_index=True, height=525)
