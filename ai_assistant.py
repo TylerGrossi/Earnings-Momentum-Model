@@ -1863,7 +1863,7 @@ def chat_fragment(api_key: str):
     input_col, clear_col = st.columns([6, 1])
     
     with clear_col:
-        clear_clicked = st.button("Clear", use_container_width=True, key="clear_chat")
+        clear_clicked = st.button("Clear", width="stretch", key="clear_chat")
     
     with input_col:
         prompt = st.chat_input("Ask about your strategy...")

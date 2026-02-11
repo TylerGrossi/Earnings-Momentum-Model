@@ -269,12 +269,12 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
             margin=dict(t=50, b=50)
         )
         fig.add_hline(y=0, line_dash="dash", line_color="#475569")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     
     with col2:
         st.dataframe(
             display_stats, 
-            use_container_width=True, 
+            width="stretch", 
             hide_index=True,
             column_config={
                 "Total Return": st.column_config.NumberColumn(format="%.1f%%"),
@@ -416,7 +416,7 @@ def _render_surprise_magnitude(analysis_df, return_col, valid_surprise, total_tr
             )
             fig.add_hline(y=0, line_dash="dash", line_color="#475569")
             fig.add_vline(x=0, line_dash="dash", line_color="#475569")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         
         with col2:
             correlation = scatter_df['EPS Surprise (%)'].corr(scatter_df[return_col])
@@ -480,7 +480,7 @@ def _render_raw_data(analysis_df, return_col):
         
         st.dataframe(
             display_data,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=500
         )
@@ -504,4 +504,4 @@ def _render_raw_data(analysis_df, return_col):
     
     if key_cols:
         summary = analysis_df[key_cols].describe().T
-        st.dataframe(summary.round(2), use_container_width=True)
+        st.dataframe(summary.round(2), width="stretch")

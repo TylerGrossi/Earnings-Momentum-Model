@@ -104,7 +104,7 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
 
         st.dataframe(
             matrix_df.drop(columns=["SL_Value"]), 
-            use_container_width=True, 
+            width="stretch", 
             hide_index=True,
             column_config={
                 "Total Return (%)": st.column_config.NumberColumn(format="%+.2f%%"),
@@ -130,7 +130,7 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
                     line=dict(width=3 if is_base else 2, dash='dash' if is_base else 'solid', color='white' if is_base else None)
                 ))
             fig.update_layout(template="plotly_dark", hovermode="x unified", height=400, margin=dict(l=0,r=0,t=20,b=0))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         with col_analysis:
             st.markdown("**Backtest Insights**")

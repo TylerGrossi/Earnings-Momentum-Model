@@ -1,6 +1,8 @@
+import io
 import streamlit as st
 import pandas as pd
 import time
+from contextlib import redirect_stderr
 from datetime import datetime, timedelta
 
 try:
@@ -180,12 +182,13 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
         end_str = end.strftime("%Y-%m-%d")
         hist = None
         for attempt in range(2):  # retry once on empty (often 429 rate limit)
-            hist = yf.Ticker(ticker).history(
-                interval="1d",
-                start=start_str,
-                end=end_str,
-                auto_adjust=True,
-            )
+            with redirect_stderr(io.StringIO()):  # suppress yfinance "Failed to get ticker" / "No timezone found"
+                hist = yf.Ticker(ticker).history(
+                    interval="1d",
+                    start=start_str,
+                    end=end_str,
+                    auto_adjust=True,
+                )
             if hist is not None and not hist.empty and "Close" in hist.columns:
                 break
             if attempt == 0:
@@ -252,7 +255,9 @@ def render_stock_screener_tab(raw_returns_df):
         tracked_tickers_this_week = set()
         skipped_tracked = []
         if not this_week_df.empty:
-            for _, row in this_week_df.iterrows():
+            status_text.text("Fetching returns for reported tickers...")
+            n_week = len(this_week_df)
+            for i, (_, row) in enumerate(this_week_df.iterrows()):
                 ticker = row.get('Ticker', '')
                 tracked_tickers_this_week.add(ticker)
                 
@@ -296,6 +301,7 @@ def render_stock_screener_tab(raw_returns_df):
                         return_pct = f"{ret:.1%}"
                         open_price = f"{entry_px:.2f}"
                         current_price = f"{curr_px:.2f}"
+                progress.progress(0.08 + 0.02 * (i + 1) / n_week)
                 
                 # Get Sector (default to Unknown if not available)
                 sector = row.get('Sector', 'Unknown')
@@ -339,6 +345,10 @@ def render_stock_screener_tab(raw_returns_df):
         today = datetime.now(MARKET_TZ).date()  # Use Eastern Time date
         
         for i, t in enumerate(barchart_passed):
+            # Skip yfinance calls for tickers already in tracker (avoids 429 and duplicate errors)
+            if t in tracked_tickers_this_week:
+                progress.progress(0.5 + 0.5 * (i + 1) / len(barchart_passed) if barchart_passed else 1.0)
+                continue
             data = get_finviz_data(t)
             date_info = get_date_check(t)
             
@@ -522,7 +532,7 @@ def _render_screener_results():
     show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
     filtered_display = filtered[[c for c in show_cols if c in filtered.columns]].copy()
 
-    st.dataframe(filtered_display, use_container_width=True, hide_index=True, height=525)
+    st.dataframe(filtered_display, width="stretch", hide_index=True, height=525)
 
     # ML Model Info
     ml_available = st.session_state.get("screener_ml_available", False)
@@ -546,4 +556,4 @@ def _render_screener_results():
     all_skipped = st.session_state.get("screener_skipped", [])
     if all_skipped:
         with st.expander(f"{len(all_skipped)} tickers skipped"):
-            st.dataframe(pd.DataFrame(all_skipped), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(all_skipped), width="stretch", hide_index=True)

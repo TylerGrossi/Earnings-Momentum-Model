@@ -153,7 +153,7 @@ def render_mcp_tab():
                             )
             
             # Execute button
-            if st.button("🚀 Run Tool", type="primary", use_container_width=True):
+            if st.button("🚀 Run Tool", type="primary", width="stretch"):
                 with st.spinner("Executing..."):
                     result = execute_tool(selected_tool, arguments)
                     
@@ -339,7 +339,7 @@ def _display_tool_result(tool_name: str, result: dict):
         if stocks:
             import pandas as pd
             df = pd.DataFrame(stocks)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
         else:
             st.info("No earnings this week in tracker.")
     
@@ -385,7 +385,7 @@ def _display_tool_result(tool_name: str, result: dict):
             sector_df = pd.DataFrame([
                 {"Sector": k, **v} for k, v in sector_stats.items()
             ]).sort_values("avg_return", ascending=False)
-            st.dataframe(sector_df, use_container_width=True, hide_index=True)
+            st.dataframe(sector_df, width="stretch", hide_index=True)
     
     elif tool_name == "run_backtest":
         st.markdown("### Backtest Results")
@@ -452,7 +452,7 @@ def _display_tool_result(tool_name: str, result: dict):
             import pandas as pd
             df = pd.DataFrame(comparison)
             df.columns = ["Stop Loss %", "Total Return %", "Alpha %", "Win Rate %"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
     
     else:
         # Default: just show the result
