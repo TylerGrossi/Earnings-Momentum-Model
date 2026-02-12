@@ -176,7 +176,8 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
     if entry_date > today:
         return None
     try:
-        start = entry_date - timedelta(days=30)
+        # Request extra history so we have entry_date even if yfinance trims or delays
+        start = entry_date - timedelta(days=60)
         end = today + timedelta(days=1)
         start_str = start.strftime("%Y-%m-%d")
         end_str = end.strftime("%Y-%m-%d")
@@ -194,7 +195,7 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
             old_logging = True
         try:
             hist = None
-            for attempt in range(2):  # retry once on empty (often 429 rate limit)
+            for attempt in range(3):  # up to 3 attempts (429 / empty on Cloud)
                 with redirect_stderr(io.StringIO()):
                     hist = yf.Ticker(ticker).history(
                         interval="1d",
@@ -204,8 +205,8 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
                     )
                 if hist is not None and not hist.empty and "Close" in hist.columns:
                     break
-                if attempt == 0:
-                    time.sleep(1.0)  # back off before retry
+                if attempt < 2:
+                    time.sleep(2.0)  # back off before retry (helps 429 on Streamlit Cloud)
         finally:
             yf_log.setLevel(old_level)
             if getattr(yf, "config", None) is not None and hasattr(yf.config, "debug"):
@@ -215,8 +216,14 @@ def get_reported_return(ticker, earnings_date, earnings_timing):
                     pass
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
-        # Use index date only (no timezone lookup); daily bars are one per trading day
-        hist_dates = pd.Series(hist.index).dt.date
+        # Use date part of index (if tz-aware, convert to Eastern so date = US trading day)
+        idx = hist.index
+        try:
+            if hasattr(idx, "tz") and idx.tz is not None:
+                idx = idx.tz_convert(MARKET_TZ)
+        except Exception:
+            pass
+        hist_dates = pd.Series(idx).dt.date
         mask = hist_dates <= entry_date
         entry_bars = hist.loc[mask]
         if entry_bars.empty:
@@ -303,7 +310,7 @@ def render_stock_screener_tab(raw_returns_df):
                 open_price = "N/A"
                 current_price = "N/A"
                 if status == "Reported" and yf is not None:
-                    time.sleep(0.5)  # throttle to avoid Yahoo 429 rate limit (e.g. on Streamlit Cloud)
+                    time.sleep(1.0)  # throttle to avoid Yahoo 429 (Streamlit Cloud)
                     result = get_reported_return(ticker, earnings_date, timing)
                     if result is not None:
                         ret, entry_px, curr_px = result

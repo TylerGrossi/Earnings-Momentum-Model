@@ -492,8 +492,10 @@ def _render_raw_data(analysis_df, return_col):
             label="Download Filtered Data",
             data=csv,
             file_name="earnings_analysis_data.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key="earnings_analysis_download_csv",
         )
+        st.caption("If you see a \"Missing file\" error after the app restarted, refresh the page and click Download again.")
     
     st.markdown("---")
     st.markdown("#### Summary Statistics")
