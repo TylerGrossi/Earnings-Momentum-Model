@@ -305,18 +305,31 @@ def render_stock_screener_tab(raw_returns_df):
                 # Determine status based on whether earnings have actually happened
                 status = "Reported" if has_earnings_happened(earnings_date, timing) else "Upcoming"
                 
-                # Reported return from yfinance (entry = 4pm close on entry date, current = latest)
+                # Reported return: use tracker first (works on Cloud without yfinance); fallback to yfinance
                 return_pct = "N/A"
                 open_price = "N/A"
                 current_price = "N/A"
-                if status == "Reported" and yf is not None:
-                    time.sleep(1.0)  # throttle to avoid Yahoo 429 (Streamlit Cloud)
-                    result = get_reported_return(ticker, earnings_date, timing)
-                    if result is not None:
-                        ret, entry_px, curr_px = result
-                        return_pct = f"{ret:.1%}"
-                        open_price = f"{entry_px:.2f}"
-                        current_price = f"{curr_px:.2f}"
+                if status == "Reported":
+                    ret_today = row.get("Return to Today")
+                    entry_px = row.get("Price")
+                    if pd.notna(ret_today) and pd.notna(entry_px):
+                        try:
+                            r = float(ret_today)
+                            p = float(entry_px)
+                            if p > 0:
+                                return_pct = f"{r:.1%}"
+                                open_price = f"{p:.2f}"
+                                current_price = f"{p * (1 + r):.2f}"
+                        except (TypeError, ValueError):
+                            pass
+                    if return_pct == "N/A" and yf is not None:
+                        time.sleep(1.0)  # throttle to avoid Yahoo 429 (Streamlit Cloud)
+                        result = get_reported_return(ticker, earnings_date, timing)
+                        if result is not None:
+                            ret, entry_px, curr_px = result
+                            return_pct = f"{ret:.1%}"
+                            open_price = f"{entry_px:.2f}"
+                            current_price = f"{curr_px:.2f}"
                 progress.progress(0.4 + 0.05 * (i + 1) / n_week)
                 
                 # Get Sector (default to Unknown if not available)
