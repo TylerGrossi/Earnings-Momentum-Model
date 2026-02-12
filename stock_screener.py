@@ -1,15 +1,7 @@
-import io
-import logging
 import streamlit as st
 import pandas as pd
 import time
-from contextlib import redirect_stderr
 from datetime import datetime, timedelta
-
-try:
-    import yfinance as yf
-except ImportError:
-    yf = None
 
 # Eastern time (EST/EDT) for market hours — America/New_York is the correct US Eastern zone
 try:
@@ -139,105 +131,6 @@ def has_earnings_happened(earnings_date, earnings_timing):
         return False
 
 
-def _entry_date_for_return(earnings_date, earnings_timing):
-    """
-    Date whose 4pm EST close we use as entry price.
-    BMO: day before earnings; AMC: day of earnings.
-    If that date is weekend, use previous Friday.
-    """
-    if earnings_date is None:
-        return None
-    earn_date = _earnings_date_only(earnings_date)
-    timing = str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else ""
-    if "BMO" in timing:
-        entry_date = earn_date - timedelta(days=1)
-    else:
-        entry_date = earn_date
-    # If weekend, use previous Friday
-    while entry_date.weekday() >= 5:
-        entry_date -= timedelta(days=1)
-    return entry_date
-
-
-def get_reported_return(ticker, earnings_date, earnings_timing):
-    """
-    Return (return_pct, entry_price, current_price) for reported earnings.
-    return_pct = (current - entry) / entry as decimal (e.g. 0.05 for 5%).
-    Entry = close on entry_date (4pm EST = daily close; BMO = day before earnings, AMC = day of).
-    Uses yfinance daily data. Returns None on error or if yfinance unavailable.
-    """
-    if yf is None:
-        return None
-    entry_date = _entry_date_for_return(earnings_date, earnings_timing)
-    if entry_date is None:
-        return None
-    now_est = datetime.now(MARKET_TZ)
-    today = now_est.date()
-    if entry_date > today:
-        return None
-    try:
-        # Request extra history so we have entry_date even if yfinance trims or delays
-        start = entry_date - timedelta(days=60)
-        end = today + timedelta(days=1)
-        start_str = start.strftime("%Y-%m-%d")
-        end_str = end.strftime("%Y-%m-%d")
-        # Suppress yfinance "Failed to get ticker" / "No timezone found" (stderr + logging)
-        yf_log = logging.getLogger("yfinance")
-        old_level = yf_log.level
-        yf_log.setLevel(logging.CRITICAL)
-        if getattr(yf, "config", None) is not None and hasattr(yf.config, "debug"):
-            try:
-                old_logging = getattr(yf.config.debug, "logging", True)
-                yf.config.debug.logging = False
-            except Exception:
-                old_logging = True
-        else:
-            old_logging = True
-        try:
-            hist = None
-            for attempt in range(3):  # up to 3 attempts (429 / empty on Cloud)
-                with redirect_stderr(io.StringIO()):
-                    hist = yf.Ticker(ticker).history(
-                        interval="1d",
-                        start=start_str,
-                        end=end_str,
-                        auto_adjust=True,
-                    )
-                if hist is not None and not hist.empty and "Close" in hist.columns:
-                    break
-                if attempt < 2:
-                    time.sleep(2.0)  # back off before retry (helps 429 on Streamlit Cloud)
-        finally:
-            yf_log.setLevel(old_level)
-            if getattr(yf, "config", None) is not None and hasattr(yf.config, "debug"):
-                try:
-                    yf.config.debug.logging = old_logging
-                except Exception:
-                    pass
-        if hist is None or hist.empty or "Close" not in hist.columns:
-            return None
-        # Use date part of index (if tz-aware, convert to Eastern so date = US trading day)
-        idx = hist.index
-        try:
-            if hasattr(idx, "tz") and idx.tz is not None:
-                idx = idx.tz_convert(MARKET_TZ)
-        except Exception:
-            pass
-        hist_dates = pd.Series(idx).dt.date
-        mask = hist_dates <= entry_date
-        entry_bars = hist.loc[mask]
-        if entry_bars.empty:
-            return None
-        entry_price = float(entry_bars["Close"].iloc[-1])
-        current_price = float(hist["Close"].iloc[-1])
-        if entry_price <= 0:
-            return None
-        ret_pct = (current_price - entry_price) / entry_price
-        return (ret_pct, entry_price, current_price)
-    except Exception:
-        return None
-
-
 def render_stock_screener_tab(raw_returns_df):
     """Render the Stock Screener tab."""
     
@@ -305,7 +198,7 @@ def render_stock_screener_tab(raw_returns_df):
                 # Determine status based on whether earnings have actually happened
                 status = "Reported" if has_earnings_happened(earnings_date, timing) else "Upcoming"
                 
-                # Reported return: use tracker first (works on Cloud without yfinance); fallback to yfinance
+                # Reported return: tracker only (Return to Today = return, Price = open, Price*(1+ret) = current)
                 return_pct = "N/A"
                 open_price = "N/A"
                 current_price = "N/A"
@@ -322,14 +215,6 @@ def render_stock_screener_tab(raw_returns_df):
                                 current_price = f"{p * (1 + r):.2f}"
                         except (TypeError, ValueError):
                             pass
-                    if return_pct == "N/A" and yf is not None:
-                        time.sleep(1.0)  # throttle to avoid Yahoo 429 (Streamlit Cloud)
-                        result = get_reported_return(ticker, earnings_date, timing)
-                        if result is not None:
-                            ret, entry_px, curr_px = result
-                            return_pct = f"{ret:.1%}"
-                            open_price = f"{entry_px:.2f}"
-                            current_price = f"{curr_px:.2f}"
                 progress.progress(0.4 + 0.05 * (i + 1) / n_week)
                 
                 # Get Sector (default to Unknown if not available)

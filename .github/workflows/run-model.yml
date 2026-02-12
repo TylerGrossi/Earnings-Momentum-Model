@@ -2,8 +2,10 @@ name: Run Earnings Momentum Model
 
 on:
   schedule:
-    # 12:00 UTC = 7:00 AM Eastern (EST) / 8:00 AM Eastern (EDT). Model uses US Eastern for "today" and Date Added so output matches local 7 AM ET run.
+    # 7 AM Eastern: 12:00 UTC (EST) / 11:00 UTC (EDT)
     - cron: '0 12 * * *'
+    # 4 PM Eastern: 21:00 UTC (EST) / 20:00 UTC (EDT)
+    - cron: '0 21 * * *'
   workflow_dispatch:        # allows manual runs from Actions tab
 
 # ✅ Allow the workflow token to push commits back to the repo
