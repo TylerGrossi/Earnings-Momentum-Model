@@ -16,6 +16,13 @@ from datetime import datetime, timedelta, time, timezone
 from zoneinfo import ZoneInfo
 import time, re, os
 
+# Win probability predictor (optional: requires sklearn and returns_tracker history)
+try:
+    from win_probability_predictor import prepare_features, train_model, predict_win_probability
+    WIN_PROB_AVAILABLE = True
+except Exception:
+    WIN_PROB_AVAILABLE = False
+
 # ------------------------------------
 # CONFIG
 # ------------------------------------
@@ -660,6 +667,45 @@ def build_universe():
 
 
 # ------------------------------------
+# WIN PROBABILITY (for new tickers)
+# ------------------------------------
+
+def train_win_prob_model(existing_df):
+    """Train win probability model on existing returns_tracker data. Returns (model, encoders) or (None, None)."""
+    if not WIN_PROB_AVAILABLE or existing_df is None or existing_df.empty:
+        return None, None
+    try:
+        # Need enough rows with 5D Return for training; predictor also drops DATE PASSED
+        X, y, encoders, feature_names = prepare_features(existing_df)
+        if len(X) < 10:
+            return None, None
+        model, _ = train_model(X, y, feature_names, model_type='random_forest')
+        return model, encoders
+    except Exception as e:
+        print(f"  Win probability model training skipped: {e}")
+        return None, None
+
+
+def get_win_probability_for_row(model, encoders, r):
+    """Get win probability (0-1) for a single row dict; returns None if not available."""
+    if model is None or encoders is None:
+        return None
+    try:
+        # Use Forward P/E if present (matches training), else P/E
+        pe_val = r.get("Forward P/E") if pd.notna(r.get("Forward P/E")) else r.get("P/E")
+        stock_data = {
+            "P/E": pe_val,
+            "Beta": r.get("Beta"),
+            "Market Cap": r.get("Market Cap"),
+            "Sector": r.get("Sector", "Unknown"),
+            "Earnings Timing": r.get("Earnings Timing", "Unknown"),
+        }
+        return round(predict_win_probability(model, encoders, stock_data), 3)
+    except Exception:
+        return None
+
+
+# ------------------------------------
 # UPDATE RETURNS
 # ------------------------------------
 
@@ -711,6 +757,19 @@ def update_returns(new_rows):
     # Backfill missing data
     udf = backfill(udf)
     
+    # Train win probability model only when we have new tickers
+    new_set = set()
+    if new_rows:
+        for row in new_rows:
+            t, fq = row.get("Ticker"), row.get("Fiscal Quarter")
+            if t and fq is not None and str(fq).strip():
+                new_set.add((str(t).strip(), str(fq).strip()))
+    win_model, win_encoders = None, None
+    if new_set:
+        win_model, win_encoders = train_win_prob_model(existing_df)
+        if win_model is not None:
+            print(f"  Win probability model trained; predicting for {len(new_set)} new ticker(s).")
+    
     # Calculate returns
     tickers = udf["Ticker"].dropna().unique().tolist()
     if not tickers:
@@ -740,6 +799,13 @@ def update_returns(new_rows):
             hi, lo, rng, hip, lop = get_stats(p, d, 7, timing)
             
             date_check = check_date_status(d, r.get("Earnings Date (yfinance)"), date_added=r.get("Date Added"), timing=timing)
+            fq_val = r.get("Fiscal Quarter")
+            fq_str = "" if (fq_val is None or pd.isna(fq_val)) else str(fq_val).strip()
+            is_new = (str(t).strip(), fq_str) in new_set
+            if is_new and win_model is not None:
+                win_prob = get_win_probability_for_row(win_model, win_encoders, r)
+            else:
+                win_prob = r.get("Win Probability") if pd.notna(r.get("Win Probability")) and r.get("Win Probability") != "" else np.nan
             rows.append({
                 "Ticker": t, "Fiscal Quarter": r.get("Fiscal Quarter"), 
                 "Earnings Date": d, "Earnings Date (yfinance)": r.get("Earnings Date (yfinance)"),
@@ -750,11 +816,15 @@ def update_returns(new_rows):
                 "Reported EPS": r.get("Reported EPS"), "EPS Surprise (%)": r.get("EPS Surprise (%)"),
                 "P/E": r.get("P/E"), "Forward P/E": r.get("Forward P/E"), 
                 "Market Cap": r.get("Market Cap"), "Beta": r.get("Beta"),
+                "Win Probability": win_prob,
                 "1D Return": round(get_ret(p, d, 1, timing), 3) if pd.notna(get_ret(p, d, 1, timing)) else np.nan,
                 "3D Return": round(get_ret(p, d, 3, timing), 3) if pd.notna(get_ret(p, d, 3, timing)) else np.nan,
                 "5D Return": round(get_ret(p, d, 5, timing), 3) if pd.notna(get_ret(p, d, 5, timing)) else np.nan,
                 "7D Return": round(get_ret(p, d, 7, timing), 3) if pd.notna(get_ret(p, d, 7, timing)) else np.nan,
                 "10D Return": round(get_ret(p, d, 10, timing), 3) if pd.notna(get_ret(p, d, 10, timing)) else np.nan,
+                "30D Return": round(get_ret(p, d, 30, timing), 3) if pd.notna(get_ret(p, d, 30, timing)) else np.nan,
+                "60D Return": round(get_ret(p, d, 60, timing), 3) if pd.notna(get_ret(p, d, 60, timing)) else np.nan,
+                "90D Return": round(get_ret(p, d, 90, timing), 3) if pd.notna(get_ret(p, d, 90, timing)) else np.nan,
                 "Return to Today": round(get_ret_today(p, d, timing), 3) if pd.notna(get_ret_today(p, d, timing)) else np.nan,
                 "1W High Return": round(hi, 3) if pd.notna(hi) else np.nan, 
                 "1W Low Return": round(lo, 3) if pd.notna(lo) else np.nan,
