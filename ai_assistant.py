@@ -449,16 +449,17 @@ def get_returns_this_week() -> str:
     current_prices = yf_prices if yf_prices else gemini_prices
     prices_from_yf = bool(yf_prices)
 
-    # Win probabilities from ML model (same as stock_screener)
+    # Win probabilities: use returns_tracker value when present (from Earnings Momentum Model for new stocks), else predict via win_probability_predictor (same features as training: P/E or Forward P/E, Beta, Market Cap, Sector, Earnings Timing)
     win_probs_display = []
     if WIN_PROB_AVAILABLE:
         try:
             training_df = filter_data(load_returns_data())
             if training_df is not None and not training_df.empty and len(training_df) >= 10:
                 ml_model, ml_encoders, _ = train_win_probability_model(training_df)
+                # Use Forward P/E when present (matches win_probability_predictor training and Earnings Momentum Model)
                 stock_data_list = [
                     {
-                        "P/E": row.get("P/E", "N/A"),
+                        "P/E": row.get("Forward P/E") if pd.notna(row.get("Forward P/E")) else row.get("P/E", "N/A"),
                         "Beta": row.get("Beta", "N/A"),
                         "Market Cap": row.get("Market Cap", "N/A"),
                         "Sector": row.get("Sector", "Unknown"),
@@ -467,13 +468,43 @@ def get_returns_this_week() -> str:
                     for _, row in reported_df.iterrows()
                 ]
                 win_probs = predict_batch(ml_model, ml_encoders, stock_data_list)
-                win_probs_display = [f"{p:.1%}" if 0 <= p <= 1 else "N/A" for p in win_probs]
+                # Prefer Win Probability from returns_tracker.csv when present (written by Earnings Momentum Model for new stocks)
+                for i, (_, row) in enumerate(reported_df.iterrows()):
+                    wp = row.get("Win Probability")
+                    if wp is not None and not (pd.isna(wp) or wp == ""):
+                        try:
+                            p = float(wp)
+                            win_probs_display.append(f"{p:.1%}" if 0 <= p <= 1 else "N/A")
+                        except (TypeError, ValueError):
+                            win_probs_display.append(f"{win_probs[i]:.1%}" if i < len(win_probs) and 0 <= win_probs[i] <= 1 else "N/A")
+                    else:
+                        win_probs_display.append(f"{win_probs[i]:.1%}" if i < len(win_probs) and 0 <= win_probs[i] <= 1 else "N/A")
             else:
-                win_probs_display = ["N/A"] * len(reported_df)
+                # Fallback: use tracker Win Probability when available
+                for _, row in reported_df.iterrows():
+                    wp = row.get("Win Probability")
+                    if wp is not None and not (pd.isna(wp) or wp == ""):
+                        try:
+                            p = float(wp)
+                            win_probs_display.append(f"{p:.1%}" if 0 <= p <= 1 else "N/A")
+                        except (TypeError, ValueError):
+                            win_probs_display.append("N/A")
+                    else:
+                        win_probs_display.append("N/A")
         except Exception:
             win_probs_display = ["N/A"] * len(reported_df)
     else:
-        win_probs_display = ["N/A"] * len(reported_df)
+        # No ML: show tracker Win Probability when present
+        for _, row in reported_df.iterrows():
+            wp = row.get("Win Probability")
+            if wp is not None and not (pd.isna(wp) or wp == ""):
+                try:
+                    p = float(wp)
+                    win_probs_display.append(f"{p:.1%}" if 0 <= p <= 1 else "N/A")
+                except (TypeError, ValueError):
+                    win_probs_display.append("N/A")
+            else:
+                win_probs_display.append("N/A")
 
     # Lead with table; short summary
     result = (
