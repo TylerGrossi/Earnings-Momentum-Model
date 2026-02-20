@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import os
 import plotly.graph_objects as go
 
+from utils import compute_portfolio_return_for_return_series
+
 def run_comparative_analysis(hourly_df, returns_df, max_days=5):
     """
     Automated backtest from -2% to -20% in 2% steps.
@@ -72,35 +74,61 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
         master_results = run_comparative_analysis(hourly_df, returns_df)
         if master_results.empty: return
 
-        # Calculation logic
+        # Build trades frame for portfolio return (same rows as master_results, with Earnings Date + Timing)
+        rd = returns_df.copy()
+        rd['Earnings Date'] = pd.to_datetime(rd['Earnings Date'], errors='coerce')
+        rd['_ed'] = rd['Earnings Date'].dt.date
+        trades_meta = master_results[['Ticker', 'Date']].copy()
+        trades_meta = trades_meta.merge(
+            rd[['Ticker', '_ed', 'Earnings Timing']].drop_duplicates(subset=['Ticker', '_ed']),
+            left_on=['Ticker', 'Date'], right_on=['Ticker', '_ed'], how='left'
+        )
+        trades_meta['Earnings Date'] = pd.to_datetime(trades_meta['Date'])
+
+        # Portfolio return for each strategy (Total Net Profit / Max Capital HWM) — quant model
         base_col = 'Normal Model (5D)'
         sl_cols = [c for c in master_results.columns if "SL" in c]
-        totals = {col: master_results[col].sum() for col in sl_cols}
-        best_sl_col = max(totals, key=totals.get)
-        best_sl_total = totals[best_sl_col]
-        
-        # 1. Summary Metrics
-        st.markdown("---")
+        port_ret_normal, _ = compute_portfolio_return_for_return_series(
+            trades_meta, master_results[base_col], earnings_date_col='Earnings Date', timing_col='Earnings Timing'
+        )
+        portfolio_returns = {}
+        for col in sl_cols:
+            pr, _ = compute_portfolio_return_for_return_series(
+                trades_meta, master_results[col], earnings_date_col='Earnings Date', timing_col='Earnings Timing'
+            )
+            portfolio_returns[col] = pr if pr is not None else 0.0
+        best_sl_col = max(portfolio_returns, key=portfolio_returns.get)
+        best_portfolio_return = portfolio_returns[best_sl_col]
+        port_ret_normal = port_ret_normal if port_ret_normal is not None else 0.0
+
+        # If no stop loss beats the normal model, recommend no stop loss
+        use_stop_loss = best_portfolio_return > port_ret_normal
+        recommended_label = best_sl_col.replace("SL ", "") if use_stop_loss else "No stop loss"
+        optimized_return = best_portfolio_return if use_stop_loss else port_ret_normal
+        alpha_delta = (best_portfolio_return - port_ret_normal) * 100 if use_stop_loss else 0.0
+
+        # 1. Summary Metrics (portfolio returns, not raw sums)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Trades", len(master_results))
-        c2.metric("Normal 5D Return", f"{master_results[base_col].sum()*100:+.1f}%")
-        c3.metric("Best Stop Level", best_sl_col.replace("SL ", ""))
-        c4.metric("Optimized Return", f"{best_sl_total*100:+.1f}%", 
-                  delta=f"{(best_sl_total - master_results[base_col].sum())*100:+.1f}% Alpha")
+        c2.metric("Normal portfolio return", f"{port_ret_normal*100:+.2f}%")
+        c3.metric("Recommendation", recommended_label)
+        c4.metric("Optimized portfolio return", f"{optimized_return*100:+.2f}%",
+                  delta=f"{alpha_delta:+.2f}% Alpha" if use_stop_loss else "No improvement")
         st.markdown("---")
 
-        # 2. Performance Comparison Matrix (Sortable Table)
+        # 2. Performance Comparison Matrix — Total Return (%) = portfolio return for that strategy
         st.markdown("### Performance Comparison Matrix")
         matrix_df = pd.DataFrame([
             {
                 "SL_Value": int(col.replace("SL ", "").replace("%", "")),
                 "Strategy": col,
-                "Total Return (%)": round(master_results[col].sum() * 100, 2),
-                "Alpha vs Normal (%)": round((master_results[col].sum() - master_results[base_col].sum()) * 100, 2),
+                "Total Return (%)": round(portfolio_returns.get(col, 0) * 100, 2),
+                "Alpha vs Normal (%)": round((portfolio_returns.get(col, 0) - port_ret_normal) * 100, 2),
                 "Win Rate (%)": round((master_results[col] > 0).mean() * 100, 1),
                 "Avg Return (%)": round(master_results[col].mean() * 100, 2)
             } for col in sl_cols
-        ]).sort_values("SL_Value", ascending=False) # Sorted -2% to -20%
+        ]).sort_values("SL_Value", ascending=False)
+
 
         st.dataframe(
             matrix_df.drop(columns=["SL_Value"]), 
@@ -119,7 +147,7 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
         col_chart, col_analysis = st.columns([2.5, 1])
 
         with col_chart:
-            top_3_sl = sorted(totals, key=totals.get, reverse=True)[:3]
+            top_3_sl = sorted(portfolio_returns, key=portfolio_returns.get, reverse=True)[:3]
             chart_cols = [base_col] + top_3_sl
             res_cum = master_results.sort_values('Date').copy()
             fig = go.Figure()
@@ -134,21 +162,19 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
 
         with col_analysis:
             st.markdown("**Backtest Insights**")
-            # Calculate Alpha per trade
-            best_avg_alpha = (master_results[best_sl_col].mean() - master_results[base_col].mean()) * 100
-            
-            st.write(f"**Primary Target:** {best_sl_col}")
-            st.write(f"**Alpha per Trade:** {best_avg_alpha:+.2f}%")
-            
-            # Improvement calculation
-            total_wins_normal = (master_results[base_col] > 0).sum()
-            total_wins_best = (master_results[best_sl_col] > 0).sum()
-            win_delta = total_wins_best - total_wins_normal
-            
-            st.write(f"**Win Rate Delta:** {win_delta:+} trades")
-            
-            # Risk/Reward Note
-            st.info(f"The {best_sl_col} strategy provides the highest total return over {len(master_results)} trades while maintaining the optimal balance between 'breathing room' and protection.")
+            if use_stop_loss:
+                best_avg_alpha = (master_results[best_sl_col].mean() - master_results[base_col].mean()) * 100
+                st.write(f"**Primary Target:** {best_sl_col}")
+                st.write(f"**Alpha per Trade:** {best_avg_alpha:+.2f}%")
+                total_wins_normal = (master_results[base_col] > 0).sum()
+                total_wins_best = (master_results[best_sl_col] > 0).sum()
+                win_delta = total_wins_best - total_wins_normal
+                st.write(f"**Win Rate Delta:** {win_delta:+} trades")
+                st.info(f"The {best_sl_col} strategy provides the highest portfolio return over {len(master_results)} trades while maintaining the optimal balance between 'breathing room' and protection.")
+            else:
+                st.write("**Recommendation:** No stop loss")
+                st.write("None of the stop-loss levels improved portfolio return over the normal (no stop loss) model.")
+                st.info("Sticking with the normal 5D hold is optimal for this backtest. Re-run as more data accumulates to see if a stop loss becomes beneficial.")
 
     else:
         st.error("Missing hourly_prices.csv in repository.")

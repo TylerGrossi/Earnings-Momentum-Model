@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
+from utils import compute_portfolio_return_for_return_series
+
 
 def render_earnings_analysis_tab(returns_df, filter_stats):
     """Render the Earnings Analysis tab."""
@@ -97,18 +99,7 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
     if len(scatter_df) < 5:
         st.warning("Not enough data for analysis.")
         return
-    
-    # Define bucket ranges for drilldown
-    bucket_ranges = {
-        '< -10%': (-100, -10),
-        '-10% to -5%': (-10, -5),
-        '-5% to 0%': (-5, 0),
-        '0% to 5%': (0, 5),
-        '5% to 10%': (5, 10),
-        '10% to 20%': (10, 20),
-        '> 20%': (20, 100)
-    }
-    
+
     # Create surprise buckets
     def bucket_surprise(x):
         if pd.isna(x):
@@ -129,138 +120,55 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
             return '> 20%'
     
     scatter_df['Surprise Bucket'] = scatter_df['EPS Surprise (%)'].apply(bucket_surprise)
+
+    def _portfolio_return_pct(sub_df, ret_col_pct):
+        """Portfolio return (%) for a subset: same capital/timing logic as Power BI."""
+        if sub_df.empty or ret_col_pct not in sub_df.columns:
+            return None
+        sub = sub_df.dropna(subset=[ret_col_pct]).copy()
+        if sub.empty or 'Earnings Date' not in sub.columns:
+            return None
+        sub['Earnings Date'] = pd.to_datetime(sub['Earnings Date'], errors='coerce')
+        sub = sub[sub['Earnings Date'].notna()]
+        if sub.empty:
+            return None
+        timing_col = 'Earnings Timing' if 'Earnings Timing' in sub.columns else None
+        ret_decimal = sub[ret_col_pct].astype(float) / 100.0
+        pr, _ = compute_portfolio_return_for_return_series(
+            sub, ret_decimal, earnings_date_col='Earnings Date', timing_col=timing_col
+        )
+        return (pr * 100) if pr is not None else None
     
-    # Calculate IQR stats per bucket
-    def calc_iqr_mean(group):
-        q1 = group.quantile(0.25)
-        q3 = group.quantile(0.75)
-        iqr_data = group[(group >= q1) & (group <= q3)]
-        return iqr_data.mean() if len(iqr_data) > 0 else group.mean()
-    
-    # Calculate 2σ average (excluding outliers beyond 2 std devs)
-    def calc_2sigma_mean(group):
-        mean = group.mean()
-        std = group.std()
-        if pd.isna(std) or std == 0:
-            return mean
-        filtered = group[(group >= mean - 2 * std) & (group <= mean + 2 * std)]
-        return filtered.mean() if len(filtered) > 0 else mean
-    
-    # Session state for drilldown
-    if 'drilldown_bucket' not in st.session_state:
-        st.session_state.drilldown_bucket = None
-    
+    # Main view only: buckets with 5D average return (no dropdowns, no drilldown)
+    bucket_order = ['< -10%', '-10% to -5%', '-5% to 0%', '0% to 5%', '5% to 10%', '10% to 20%', '> 20%']
+    bucket_stats = scatter_df.groupby('Surprise Bucket')[return_col].agg(['mean', 'count']).round(2)
+    bucket_stats = bucket_stats.rename(columns={'mean': '5D Average Return (%)', 'count': 'Count'})
+    bucket_stats = bucket_stats.reset_index()
+    bucket_stats['sort_order'] = bucket_stats['Surprise Bucket'].apply(
+        lambda x: bucket_order.index(x) if x in bucket_order else 99
+    )
+    bucket_stats = bucket_stats.sort_values('sort_order').drop(columns=['sort_order'])
+    display_stats = bucket_stats[['Surprise Bucket', '5D Average Return (%)']].copy()
+
     col1, col2 = st.columns([1.5, 1])
-    
     with col1:
-        # Dropdowns side by side
-        dropdown_col1, dropdown_col2 = st.columns(2)
-        
-        with dropdown_col1:
-            metric_type = st.selectbox("Display metric:", ["Median", "Average", "Average (excl. 2σ outliers)", "IQR Mean (25th-75th)", "Total"], index=0)
-        
-        with dropdown_col2:
-            selected_bucket = st.selectbox("Drill down into:", ["All Buckets"] + list(bucket_ranges.keys()), index=0)
-        
-        if selected_bucket != "All Buckets":
-            # Drilldown view - 1% increments
-            low, high = bucket_ranges[selected_bucket]
-            drilldown_df = scatter_df[
-                (scatter_df['EPS Surprise (%)'] >= low) & 
-                (scatter_df['EPS Surprise (%)'] < high)
-            ].copy()
-            
-            # Create 1% buckets
-            def one_pct_bucket(x):
-                floor_val = int(np.floor(x))
-                return f"{floor_val}% to {floor_val+1}%"
-            
-            drilldown_df['Detail Bucket'] = drilldown_df['EPS Surprise (%)'].apply(one_pct_bucket)
-            
-            if len(drilldown_df) > 0:
-                detail_stats = drilldown_df.groupby('Detail Bucket').agg({
-                    return_col: ['sum', 'mean', 'median', 'count'],
-                }).round(2)
-                detail_stats.columns = ['Total Return', 'Avg Return', 'Median', 'Count']
-                detail_stats['IQR Mean'] = drilldown_df.groupby('Detail Bucket')[return_col].apply(calc_iqr_mean).round(2)
-                detail_stats['Avg (2σ)'] = drilldown_df.groupby('Detail Bucket')[return_col].apply(calc_2sigma_mean).round(2)
-                detail_stats['Win Rate'] = drilldown_df.groupby('Detail Bucket')[return_col].apply(
-                    lambda x: (x > 0).mean() * 100
-                ).round(1)
-                detail_stats = detail_stats.reset_index()
-                
-                # Sort by the numeric value
-                detail_stats['sort_val'] = detail_stats['Detail Bucket'].apply(
-                    lambda x: int(x.split('%')[0])
-                )
-                detail_stats = detail_stats.sort_values('sort_val').drop(columns=['sort_val'])
-                
-                display_stats = detail_stats
-                x_col = 'Detail Bucket'
-                chart_title_prefix = f"Drilldown: {selected_bucket}"
-            else:
-                st.warning("No data in this bucket.")
-                return
-        else:
-            # Main view - original buckets
-            bucket_stats = scatter_df.groupby('Surprise Bucket').agg({
-                return_col: ['sum', 'mean', 'median', 'count'],
-            }).round(2)
-            bucket_stats.columns = ['Total Return', 'Avg Return', 'Median', 'Count']
-            bucket_stats['IQR Mean'] = scatter_df.groupby('Surprise Bucket')[return_col].apply(calc_iqr_mean).round(2)
-            bucket_stats['Avg (2σ)'] = scatter_df.groupby('Surprise Bucket')[return_col].apply(calc_2sigma_mean).round(2)
-            bucket_stats['Win Rate'] = scatter_df.groupby('Surprise Bucket')[return_col].apply(
-                lambda x: (x > 0).mean() * 100
-            ).round(1)
-            bucket_stats = bucket_stats.reset_index()
-            
-            bucket_order = ['< -10%', '-10% to -5%', '-5% to 0%', '0% to 5%', '5% to 10%', '10% to 20%', '> 20%']
-            bucket_stats['sort_order'] = bucket_stats['Surprise Bucket'].apply(
-                lambda x: bucket_order.index(x) if x in bucket_order else 99
-            )
-            bucket_stats = bucket_stats.sort_values('sort_order').drop(columns=['sort_order'])
-            
-            display_stats = bucket_stats
-            x_col = 'Surprise Bucket'
-            chart_title_prefix = ""
-        
-        # Choose which column to display based on dropdown
-        if metric_type == "Average":
-            display_col = 'Avg Return'
-            metric_label = "Average"
-        elif metric_type == "Median":
-            display_col = 'Median'
-            metric_label = "Median"
-        elif metric_type == "Total":
-            display_col = 'Total Return'
-            metric_label = "Total"
-        elif metric_type == "Average (excl. 2σ outliers)":
-            display_col = 'Avg (2σ)'
-            metric_label = "Avg (2σ)"
-        else:
-            display_col = 'IQR Mean'
-            metric_label = "IQR Mean"
-        
-        chart_title = f"{chart_title_prefix} {metric_label} Return by EPS Surprise Bucket".strip()
-        y_label = f"{metric_label} {return_col} (%)"
-        
+        y_vals = display_stats['5D Average Return (%)']
         fig = go.Figure()
         fig.add_trace(go.Bar(
-            x=display_stats[x_col],
-            y=display_stats[display_col],
+            x=display_stats['Surprise Bucket'],
+            y=y_vals,
             marker_color='#3b82f6',
-            text=display_stats[display_col].apply(lambda x: f"{x:+.2f}%"),
+            text=y_vals.apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A"),
             textposition='outside'
         ))
-        
-        y_min = display_stats[display_col].min()
-        y_max = display_stats[display_col].max()
+        y_valid = y_vals.dropna()
+        y_min = y_valid.min() if len(y_valid) > 0 else 0
+        y_max = y_valid.max() if len(y_valid) > 0 else 5
         y_padding = (y_max - y_min) * 0.2 if y_max != y_min else 5
-        
         fig.update_layout(
-            title=chart_title,
+            title="5D Average Return by EPS Surprise Bucket",
             xaxis_title="EPS Surprise %",
-            yaxis_title=y_label,
+            yaxis_title="5D Average Return (%)",
             plot_bgcolor='rgba(0,0,0,0)',
             paper_bgcolor='rgba(0,0,0,0)',
             font_color='#94a3b8',
@@ -270,72 +178,56 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
         )
         fig.add_hline(y=0, line_dash="dash", line_color="#475569")
         st.plotly_chart(fig, width="stretch")
-    
+
     with col2:
         st.dataframe(
-            display_stats, 
-            width="stretch", 
+            display_stats,
+            width="stretch",
             hide_index=True,
-            column_config={
-                "Total Return": st.column_config.NumberColumn(format="%.1f%%"),
-                "Avg Return": st.column_config.NumberColumn(format="%.2f%%"),
-                "Median": st.column_config.NumberColumn(format="%.2f%%"),
-                "IQR Mean": st.column_config.NumberColumn(format="%.2f%%"),
-                "Avg (2σ)": st.column_config.NumberColumn(format="%.2f%%"),
-                "Win Rate": st.column_config.NumberColumn(format="%.1f%%"),
-            }
+            column_config={"5D Average Return (%)": st.column_config.NumberColumn(format="%.2f%%")}
         )
     
-    # Simple Beat vs Miss summary
+    # Simple Beat vs Miss summary (portfolio return, not sum of returns)
     st.markdown("---")
     st.markdown("#### Simple Beat vs Miss (Any Amount)")
     
-    # Use the same filtered data as the table above (scatter_df) for consistency
     known_df = scatter_df.copy()
     known_df['Beat/Miss'] = known_df['EPS Surprise (%)'].apply(
         lambda x: 'Beat' if x > 0 else 'Miss'
     )
-    
-    simple_stats = known_df.groupby('Beat/Miss').agg({
-        return_col: ['sum', 'mean', 'median', 'count'],
-        'EPS Surprise (%)': 'mean'
-    }).round(2)
-    simple_stats.columns = ['Total Return', 'Avg Return', 'Median Return', 'Count', 'Avg Surprise %']
-    simple_stats['Win Rate'] = known_df.groupby('Beat/Miss')[return_col].apply(
-        lambda x: (x > 0).mean() * 100
-    ).round(1)
-    simple_stats = simple_stats.reset_index()
-    
+    beat_df = known_df[known_df['Beat/Miss'] == 'Beat']
+    miss_df = known_df[known_df['Beat/Miss'] == 'Miss']
+    beat_port_pct = _portfolio_return_pct(beat_df, return_col)
+    miss_port_pct = _portfolio_return_pct(miss_df, return_col)
+    beat_count = len(beat_df)
+    miss_count = len(miss_df)
+    spread = (beat_df[return_col].mean() - miss_df[return_col].mean()) if beat_count > 0 and miss_count > 0 else 0
+
     col1, col2, col3 = st.columns(3)
-    
-    beat_row = simple_stats[simple_stats['Beat/Miss'] == 'Beat']
-    miss_row = simple_stats[simple_stats['Beat/Miss'] == 'Miss']
-    
     with col1:
-        if len(beat_row) > 0:
+        if beat_count > 0:
+            val = f"{beat_port_pct:+.2f}%" if beat_port_pct is not None else "N/A"
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value metric-green">{beat_row['Total Return'].values[0]:+.1f}%</div>
-                <div class="metric-label">Beat Total Return ({int(beat_row['Count'].values[0])} trades)</div>
+                <div class="metric-value metric-green">{val}</div>
+                <div class="metric-label">Beat portfolio return ({beat_count} trades)</div>
             </div>
             """, unsafe_allow_html=True)
-    
     with col2:
-        if len(miss_row) > 0:
+        if miss_count > 0:
+            val = f"{miss_port_pct:+.2f}%" if miss_port_pct is not None else "N/A"
             st.markdown(f"""
             <div class="metric-card">
-                <div class="metric-value metric-red">{miss_row['Total Return'].values[0]:+.1f}%</div>
-                <div class="metric-label">Miss Total Return ({int(miss_row['Count'].values[0])} trades)</div>
+                <div class="metric-value metric-red">{val}</div>
+                <div class="metric-label">Miss portfolio return ({miss_count} trades)</div>
             </div>
             """, unsafe_allow_html=True)
-    
     with col3:
-        if len(beat_row) > 0 and len(miss_row) > 0:
-            spread = beat_row['Avg Return'].values[0] - miss_row['Avg Return'].values[0]
+        if beat_count > 0 and miss_count > 0:
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-value metric-blue">{spread:+.2f}%</div>
-                <div class="metric-label">Beat - Miss Avg Spread</div>
+                <div class="metric-label">Beat - Miss avg spread</div>
             </div>
             """, unsafe_allow_html=True)
 

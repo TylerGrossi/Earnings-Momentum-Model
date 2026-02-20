@@ -423,14 +423,14 @@ def _render_screener_results():
     df["_timing_rank"] = df["Earnings"].apply(_earnings_timing_rank)
     filtered = df.sort_values(["Earnings Date", "_timing_rank"], ascending=[True, True])
 
-    # Total return for reported tickers this week (sum of individual returns)
+    # Weekly average return for reported tickers this week (average of individual returns)
     reported = filtered[filtered["Status"] == "Reported"]
     return_vals = reported["Return"].apply(_parse_return_pct) if "Return" in reported.columns else pd.Series(dtype=float)
     return_vals = return_vals.dropna()
     if len(return_vals) > 0:
-        total_return = return_vals.sum()
+        avg_return = return_vals.mean()
         n_reported = len(return_vals)
-        st.markdown(f"**Total return (reported this week):** {total_return:.1%} ({n_reported} ticker{'s' if n_reported != 1 else ''})")
+        st.markdown(f"**Weekly return (reported this week):** {avg_return:.1%} ({n_reported} ticker{'s' if n_reported != 1 else ''})")
 
     show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
     filtered_display = filtered[[c for c in show_cols if c in filtered.columns]].copy()

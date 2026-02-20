@@ -18,7 +18,7 @@ import time, re, os
 
 # Win probability predictor (optional: requires sklearn and returns_tracker history)
 try:
-    from win_probability_predictor import prepare_features, train_model, predict_win_probability
+    from win_probability_predictor import train_win_probability_model, predict_win_probability
     WIN_PROB_AVAILABLE = True
 except Exception:
     WIN_PROB_AVAILABLE = False
@@ -675,12 +675,12 @@ def train_win_prob_model(existing_df):
     if not WIN_PROB_AVAILABLE or existing_df is None or existing_df.empty:
         return None, None
     try:
-        # Need enough rows with 5D Return for training; predictor also drops DATE PASSED
-        X, y, encoders, feature_names = prepare_features(existing_df)
-        if len(X) < 10:
-            return None, None
-        model, _ = train_model(X, y, feature_names, model_type='random_forest')
+        # train_win_probability_model needs rows with 5D Return; uses same logic as win_probability_predictor
+        model, encoders, _ = train_win_probability_model(existing_df, model_type='random_forest')
         return model, encoders
+    except (ValueError, ImportError) as e:
+        print(f"  Win probability model training skipped: {e}")
+        return None, None
     except Exception as e:
         print(f"  Win probability model training skipped: {e}")
         return None, None
@@ -757,7 +757,7 @@ def update_returns(new_rows):
     # Backfill missing data
     udf = backfill(udf)
     
-    # Train win probability model only when we have new tickers
+    # Train win probability model (from win_probability_predictor) when we have new tickers; predict for new rows and write to returns_tracker.csv
     new_set = set()
     if new_rows:
         for row in new_rows:
@@ -769,6 +769,8 @@ def update_returns(new_rows):
         win_model, win_encoders = train_win_prob_model(existing_df)
         if win_model is not None:
             print(f"  Win probability model trained; predicting for {len(new_set)} new ticker(s).")
+        else:
+            print("  Win probability model not available (need enough history with 5D Return); new rows will have blank Win Probability.")
     
     # Calculate returns
     tickers = udf["Ticker"].dropna().unique().tolist()

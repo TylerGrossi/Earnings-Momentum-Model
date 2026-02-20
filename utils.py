@@ -160,3 +160,167 @@ def earnings_sort_key(row):
     earn_str = (row["Earnings"] or "").upper()
     am_pm_rank = 0 if "BMO" in earn_str else 1 if "AMC" in earn_str else 2
     return (date, am_pm_rank)
+
+
+# ------------------------------------
+# PORTFOLIO METRICS (aligned with Power BI)
+# ------------------------------------
+CAPITAL_PER_TRADE = 2000
+
+
+def _buy_date_from_earnings(earnings_date, earnings_timing):
+    """
+    Compute Buy Date from Earnings Date and Timing (BMO/AMC).
+    Matches Power BI: BMO = day before (Mon->Fri, Sun->Fri); AMC = same day (Sat/Sun->Fri).
+    Returns a date (no time).
+    """
+    if earnings_date is None or pd.isna(earnings_date):
+        return None
+    dt = pd.to_datetime(earnings_date)
+    day = dt.date() if hasattr(dt, 'date') else dt
+    # Python: Monday=0, Sunday=6
+    wk = day.weekday()
+    timing = (str(earnings_timing).strip().upper() if pd.notna(earnings_timing) and earnings_timing else "") or "AMC"
+    if "BMO" in timing:
+        if wk == 0:   # Monday -> Friday
+            days_shift = -3
+        elif wk == 6:  # Sunday -> Friday
+            days_shift = -2
+        else:
+            days_shift = -1
+    else:
+        if wk == 5:   # Saturday -> Friday
+            days_shift = -1
+        elif wk == 6:  # Sunday -> Friday
+            days_shift = -2
+        else:
+            days_shift = 0
+    return day + timedelta(days=days_shift)
+
+
+def compute_portfolio_metrics(returns_df):
+    """
+    Compute portfolio metrics from returns_tracker-style DataFrame (aligned with Power BI).
+
+    Uses: Earnings Date, Earnings Timing, 5D Return.
+    - Total Net Profit = SUM(5D Return * CAPITAL_PER_TRADE)
+    - Max Capital High Water Mark = max concurrent trades (after first week) * CAPITAL_PER_TRADE
+    - Portfolio Return = Total Net Profit / Max Capital HWM
+    - Weekly average return = mean(5D Return) = sum(5D Return) / count(tickers with 5D not blank)
+    - Annualized Return = (1 + Portfolio Return)^(365/days) - 1
+
+    Returns dict with: weekly_avg_return, portfolio_return, annualized_return;
+    or None if insufficient data.
+
+    weekly_avg_return = mean(5D Return) over all tickers with 5D Return not blank.
+    """
+    if returns_df is None or returns_df.empty:
+        return None
+    df = returns_df.copy()
+    if '5D Return' not in df.columns or 'Earnings Date' not in df.columns:
+        return None
+
+    df['Earnings Date'] = pd.to_datetime(df['Earnings Date'], errors='coerce')
+    df['5D Return'] = pd.to_numeric(df['5D Return'], errors='coerce')
+    closed = df[df['5D Return'].notna()].copy()
+    if closed.empty:
+        return None
+
+    # Weekly average return = average of 5D returns (sum / count of tickers with 5D not blank)
+    weekly_avg_return = closed['5D Return'].mean()
+
+    timing_col = 'Earnings Timing' if 'Earnings Timing' in closed.columns else None
+    closed['_buy_date'] = closed.apply(
+        lambda r: _buy_date_from_earnings(r['Earnings Date'], r.get(timing_col) if timing_col else None),
+        axis=1
+    )
+    closed = closed[closed['_buy_date'].notna()].copy()
+    closed['_sell_date'] = closed['_buy_date'].apply(lambda d: d + timedelta(days=7))
+    if closed.empty:
+        return None
+
+    total_net_profit = (closed['5D Return'] * CAPITAL_PER_TRADE).sum()
+    global_start = closed['_buy_date'].min()
+    cutoff_date = global_start + timedelta(days=7)
+    max_sell = closed['_sell_date'].max()
+    min_buy = closed['_buy_date'].min()
+
+    # Max concurrent trades: for each day from cutoff to max_sell, count active trades (buy_date > cutoff, buy <= day <= sell)
+    day = cutoff_date
+    max_concurrent = 0
+    while day <= max_sell:
+        count = ((closed['_buy_date'] > cutoff_date) &
+                 (closed['_buy_date'] <= day) &
+                 (closed['_sell_date'] >= day)).sum()
+        max_concurrent = max(max_concurrent, count)
+        day += timedelta(days=1)
+    if max_concurrent <= 0:
+        max_capital_hwm = 1.0 * CAPITAL_PER_TRADE  # avoid div by zero
+        portfolio_return = total_net_profit / max_capital_hwm
+    else:
+        max_capital_hwm = max_concurrent * CAPITAL_PER_TRADE
+        portfolio_return = total_net_profit / max_capital_hwm
+
+    days_in_period = (max_sell - min_buy).days
+    if days_in_period <= 0:
+        days_in_period = 1
+    num_weeks = days_in_period / 7.0
+    annualized_return = (1 + portfolio_return) ** (365 / days_in_period) - 1 if days_in_period > 0 else 0.0
+
+    return {
+        'weekly_avg_return': weekly_avg_return,
+        'portfolio_return': portfolio_return,
+        'annualized_return': annualized_return,
+        'total_net_profit': total_net_profit,
+        'max_concurrent': max_concurrent,
+        'days_in_period': days_in_period,
+        'num_weeks': num_weeks,
+    }
+
+
+def compute_portfolio_return_for_return_series(trades_df, return_series, earnings_date_col='Earnings Date', timing_col='Earnings Timing'):
+    """
+    Compute portfolio return (Total Net Profit / Max Capital HWM) for a given set of trades
+    and a return series (e.g. stop-loss strategy returns). Same capital/timing logic as Power BI.
+
+    trades_df: DataFrame with one row per trade, must have earnings_date_col and optionally timing_col.
+    return_series: Series of per-trade returns (same index/length as trades_df).
+
+    Returns (portfolio_return_decimal, max_concurrent) or (None, None) if insufficient data.
+    """
+    if trades_df is None or trades_df.empty or return_series is None or len(return_series) != len(trades_df):
+        return None, None
+    df = trades_df.copy()
+    # Align by index so row order matches
+    aligned = return_series.reindex(df.index)
+    df['_ret'] = aligned.values
+    df = df[df['_ret'].notna()].copy()
+    if df.empty:
+        return None, None
+    if earnings_date_col not in df.columns:
+        return None, None
+    timing = timing_col if timing_col in df.columns else None
+    df['_buy_date'] = df.apply(
+        lambda r: _buy_date_from_earnings(r[earnings_date_col], r.get(timing) if timing else None),
+        axis=1
+    )
+    df = df[df['_buy_date'].notna()].copy()
+    df['_sell_date'] = df['_buy_date'].apply(lambda d: d + timedelta(days=7))
+    if df.empty:
+        return None, None
+    global_start = df['_buy_date'].min()
+    cutoff_date = global_start + timedelta(days=7)
+    max_sell = df['_sell_date'].max()
+    max_concurrent = 0
+    day = cutoff_date
+    while day <= max_sell:
+        count = ((df['_buy_date'] > cutoff_date) &
+                 (df['_buy_date'] <= day) &
+                 (df['_sell_date'] >= day)).sum()
+        max_concurrent = max(max_concurrent, count)
+        day += timedelta(days=1)
+    if max_concurrent <= 0:
+        max_concurrent = 1
+    total_net_profit = (df['_ret'] * CAPITAL_PER_TRADE).sum()
+    portfolio_return = total_net_profit / (max_concurrent * CAPITAL_PER_TRADE)
+    return portfolio_return, max_concurrent
