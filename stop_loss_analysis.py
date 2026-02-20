@@ -283,13 +283,29 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
                 f"Average return with this SL across all trades — matches the matrix row for {selected_sl_label}."
                 + (f" Of these, {other_count} held to 5D." if other_count else "")
             )
+        # Formula + explanation for metric tooltips (question marks)
+        help_avg_saved = (
+            "Formula: mean(SL_level − 5D_return) over trades that triggered at the stop.\n\n"
+            "Meaning: For each trade where the stop was hit (not a gap down), we take (stop level − 5D return). "
+            "A positive value means the 5D return was worse than the stop—you 'saved' by exiting at the stop instead of holding to day 5."
+        )
+        help_avg_lost_gap = (
+            "Formula: mean(return_at_gap − 5D_return) over trades that had a gap down.\n\n"
+            "Meaning: When price gaps down before the open, you get the gap return instead of the stop. "
+            "This metric is the average difference between that gap return and the 5D return. Negative means you lost more by gapping down than you would have by holding to 5D."
+        )
+        help_avg_return_all = (
+            "Formula: mean(Return with selected SL) over all trades.\n\n"
+            "Meaning: Simple average per-trade return for the selected strategy (with or without stop loss). "
+            "Matches the 'Avg Return (%)' in the Performance Comparison Matrix for this strategy."
+        )
         card1, card2, card3 = st.columns(3)
         with card1:
-            st.metric("Avg saved from stop loss", total_saved_str, help="Average (SL level − 5D return) per trade that triggered at the stop")
+            st.metric("Avg saved from stop loss", total_saved_str, help=help_avg_saved)
         with card2:
-            st.metric("Avg lost on gap down", total_lost_gap_str, help="Average (gap return − 5D return) per gap-down trade")
+            st.metric("Avg lost on gap down", total_lost_gap_str, help=help_avg_lost_gap)
         with card3:
-            st.metric(card3_label, card3_value, help=card3_help)
+            st.metric(card3_label, card3_value, help=help_avg_return_all)
 
         col_config = {
             "Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
