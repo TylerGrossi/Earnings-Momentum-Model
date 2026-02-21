@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import time
 from datetime import datetime, timedelta
 
@@ -15,7 +16,7 @@ except ImportError:
         import pytz
         MARKET_TZ = pytz.timezone("America/New_York")
 
-from utils import get_all_tickers, get_finviz_data, has_buy_signal, earnings_sort_key, parse_earnings_date
+from utils import get_all_tickers, get_finviz_data, has_buy_signal, earnings_sort_key, parse_earnings_date, is_forward_pe_low
 from data_loader import get_this_week_earnings
 from win_probability_predictor import train_win_probability_model, predict_batch
 
@@ -135,7 +136,7 @@ def render_stock_screener_tab(raw_returns_df):
     """Render the Stock Screener tab."""
     
     st.markdown("### This Week's Earnings")
-    st.markdown("**Criteria:** Earnings this week · SMA20 crossed above SMA50 · Barchart Buy Signal")
+    st.markdown("**Criteria:** Earnings this week · SMA20 crossed above SMA50 · Barchart Buy Signal · Low Forward P/E")
     
     if st.button("Find Stocks"):
         # Single progress bar and status for entire run
@@ -217,6 +218,17 @@ def render_stock_screener_tab(raw_returns_df):
                             pass
                 progress.progress(0.4 + 0.05 * (i + 1) / n_week)
                 
+                # Low P/E filter using returns_tracker columns only (Forward P/E or P/E)
+                forward_pe = row.get("Forward P/E")
+                pe_used = forward_pe if pd.notna(forward_pe) and forward_pe != "" and str(forward_pe) != "N/A" else row.get("P/E")
+                if not is_forward_pe_low(pe_used):
+                    skipped_tracked.append({
+                        "Ticker": ticker,
+                        "Earnings": earnings_str,
+                        "Reason": "Forward P/E > 15"
+                    })
+                    continue
+                
                 # Get Sector (default to Unknown if not available)
                 sector = row.get('Sector', 'Unknown')
                 if pd.isna(sector) or sector == '':
@@ -227,6 +239,7 @@ def render_stock_screener_tab(raw_returns_df):
                     "Earnings": earnings_str,
                     "Price": format_value(row.get('Price')),
                     "P/E": format_value(row.get('P/E')),
+                    "Forward P/E": format_value(row.get('Forward P/E')),
                     "Beta": format_value(row.get('Beta')),
                     "Market Cap": format_market_cap(row.get('Market Cap')),
                     "Sector": sector,
@@ -290,23 +303,34 @@ def render_stock_screener_tab(raw_returns_df):
                         "Reason": skip_reason
                     })
             else:
-                # Only add tickers the user can still act on. Status is always "Upcoming" for
-                # Finviz-origin rows. Sector left as Unknown to avoid extra yfinance calls (429).
-                market_cap = data.get("Market Cap", "N/A")
-                new_rows.append({
-                    "Ticker": t,
-                    "Earnings": earnings_str,
-                    "Price": data.get("Price", "N/A"),
-                    "P/E": data.get("P/E", "N/A"),
-                    "Beta": data.get("Beta", "N/A"),
-                    "Market Cap": market_cap,
-                    "Sector": "Unknown",
-                    "Earnings Timing": earnings_timing if earnings_timing else 'Unknown',
-                    "Status": "Upcoming",
-                    "Return": "N/A",
-                    "Open": "N/A",
-                    "Current": "N/A",
-                })
+                # Low P/E filter: only include if Forward P/E (or P/E) <= 15
+                forward_pe = data.get("Forward P/E", "N/A")
+                pe_used = forward_pe if (forward_pe and forward_pe != "N/A") else data.get("P/E", "N/A")
+                if not is_forward_pe_low(pe_used):
+                    skipped.append({
+                        "Ticker": t,
+                        "Earnings": earnings_str,
+                        "Reason": "Forward P/E > 15"
+                    })
+                else:
+                    # Only add tickers the user can still act on. Status is always "Upcoming" for
+                    # Finviz-origin rows. Sector left as Unknown to avoid extra yfinance calls (429).
+                    market_cap = data.get("Market Cap", "N/A")
+                    new_rows.append({
+                        "Ticker": t,
+                        "Earnings": earnings_str,
+                        "Price": data.get("Price", "N/A"),
+                        "P/E": data.get("P/E", "N/A"),
+                        "Forward P/E": format_value(forward_pe) if forward_pe and forward_pe != "N/A" else format_value(data.get("P/E")),
+                        "Beta": data.get("Beta", "N/A"),
+                        "Market Cap": market_cap,
+                        "Sector": "Unknown",
+                        "Earnings Timing": earnings_timing if earnings_timing else 'Unknown',
+                        "Status": "Upcoming",
+                        "Return": "N/A",
+                        "Open": "N/A",
+                        "Current": "N/A",
+                    })
             
             progress.progress(0.45 + 0.45 * (i + 1) / len(barchart_passed) if barchart_passed else 0.9)
         
@@ -318,7 +342,7 @@ def render_stock_screener_tab(raw_returns_df):
         ml_metrics = None
         ml_available = False
         if raw_returns_df is not None and not raw_returns_df.empty:
-            training_df = raw_returns_df[raw_returns_df['5D Return'].notna()].copy()
+            training_df = raw_returns_df[raw_returns_df['3D Return'].notna()].copy()
             if len(training_df) >= 10:
                 try:
                     ml_model, ml_encoders, ml_metrics = train_win_probability_model(training_df)
@@ -349,7 +373,7 @@ def render_stock_screener_tab(raw_returns_df):
                     stock_data_list = []
                     for row in all_rows:
                         stock_data_list.append({
-                            'P/E': row.get('P/E', 'N/A'),
+                            'P/E': row.get('Forward P/E') or row.get('P/E', 'N/A'),
                             'Beta': row.get('Beta', 'N/A'),
                             'Market Cap': row.get('Market Cap', 'N/A'),
                             'Sector': row.get('Sector', 'Unknown'),
@@ -378,12 +402,18 @@ def render_stock_screener_tab(raw_returns_df):
             upcoming_count = len([r for r in all_rows if r['Status'] == "Upcoming"])
             
             # Build dataframe and save to session state so filters work on rerun
-            display_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
+            display_cols = ["Ticker", "Earnings", "Win Probability", "Price", "Forward P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
             df = pd.DataFrame(all_rows)[display_cols].copy()
             df["Earnings Date"] = df["Earnings"].apply(parse_earnings_date)
             df["_win_prob_num"] = df["Win Probability"].apply(
                 lambda x: float(str(x).replace("%", "")) / 100 if x != "N/A" and "%" in str(x) else 0.0
             )
+            # Convert numeric columns so sorting works by value (not string)
+            for col in ("Price", "Forward P/E", "Beta", "Open", "Current"):
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df["Win Probability"] = df["Win Probability"].apply(_parse_pct_to_num)
+            df["Return"] = df["Return"].apply(_parse_pct_to_num)
+            df["Market Cap"] = df["Market Cap"].apply(_parse_market_cap_to_num)
             st.session_state.screener_df = df
             st.session_state.screener_ml_available = ml_available
             st.session_state.screener_ml_metrics = ml_metrics
@@ -413,6 +443,35 @@ def _parse_return_pct(s):
         return None
 
 
+def _parse_pct_to_num(s):
+    """Parse percentage string (e.g. '67.7%') to number (67.7). Returns np.nan for N/A."""
+    if pd.isna(s) or s == "N/A" or not s or "%" not in str(s):
+        return np.nan
+    try:
+        return float(str(s).replace("%", "").replace(",", "").strip())
+    except (ValueError, TypeError):
+        return np.nan
+
+
+def _parse_market_cap_to_num(s):
+    """Parse market cap string (e.g. '243.0M', '36.63B') to numeric. Returns np.nan for N/A."""
+    if pd.isna(s) or s == "N/A" or not str(s).strip():
+        return np.nan
+    s = str(s).strip().upper().replace(",", "")
+    try:
+        if s.endswith("T"):
+            return float(s[:-1]) * 1e12
+        if s.endswith("B"):
+            return float(s[:-1]) * 1e9
+        if s.endswith("M"):
+            return float(s[:-1]) * 1e6
+        if s.endswith("K"):
+            return float(s[:-1]) * 1e3
+        return float(s)
+    except (ValueError, TypeError):
+        return np.nan
+
+
 def _render_screener_results():
     """Render screener table only (no filters)."""
     if "screener_df" not in st.session_state:
@@ -425,17 +484,35 @@ def _render_screener_results():
 
     # Weekly average return for reported tickers this week (average of individual returns)
     reported = filtered[filtered["Status"] == "Reported"]
-    return_vals = reported["Return"].apply(_parse_return_pct) if "Return" in reported.columns else pd.Series(dtype=float)
-    return_vals = return_vals.dropna()
+    return_vals = reported["Return"].dropna() if "Return" in reported.columns else pd.Series(dtype=float)
+    return_vals = return_vals[pd.to_numeric(return_vals, errors="coerce").notna()]
     if len(return_vals) > 0:
-        avg_return = return_vals.mean()
-        n_reported = len(return_vals)
-        st.markdown(f"**Weekly return (reported this week):** {avg_return:.1%} ({n_reported} ticker{'s' if n_reported != 1 else ''})")
+        avg_return = float(return_vals.mean()) / 100  # Return is stored as percent points
+        n_with_return = len(return_vals)
+        n_reported_total = len(reported)
+        if n_with_return == n_reported_total:
+            st.markdown(f"**Weekly return (reported this week):** {avg_return:.1%} ({n_with_return} ticker{'s' if n_with_return != 1 else ''})")
+        else:
+            st.markdown(f"**Weekly return (reported this week):** {avg_return:.1%} ({n_with_return} of {n_reported_total} reported with return data)")
 
-    show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
+    show_cols = ["Ticker", "Earnings", "Win Probability", "Price", "Forward P/E", "Beta", "Market Cap", "Open", "Current", "Return", "Status"]
     filtered_display = filtered[[c for c in show_cols if c in filtered.columns]].copy()
 
-    st.dataframe(filtered_display, width="stretch", hide_index=True, height=525)
+    # Size table to fit rows (no blank rows); ~35px per row + header
+    n_rows = len(filtered_display)
+    table_height = min(max(35 * (n_rows + 1), 80), 600) if n_rows else 80
+    # Format numeric columns for display (values are already numeric for correct sorting)
+    column_config = {
+        "Win Probability": st.column_config.NumberColumn(format="%.1f%%"),
+        "Price": st.column_config.NumberColumn(format="%.2f"),
+        "Forward P/E": st.column_config.NumberColumn(format="%.2f"),
+        "Beta": st.column_config.NumberColumn(format="%.2f"),
+        "Market Cap": st.column_config.NumberColumn(format="compact"),  # Displays as K/M/B/T, sorts by numeric value
+        "Open": st.column_config.NumberColumn(format="%.2f"),
+        "Current": st.column_config.NumberColumn(format="%.2f"),
+        "Return": st.column_config.NumberColumn(format="%.1f%%"),
+    }
+    st.dataframe(filtered_display, width="stretch", hide_index=True, height=table_height, column_config=column_config)
 
     # ML Model Info
     ml_available = st.session_state.get("screener_ml_available", False)

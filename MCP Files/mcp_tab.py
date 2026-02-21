@@ -353,7 +353,7 @@ def _display_tool_result(tool_name: str, result: dict):
             st.metric("Market Cap", result.get("market_cap", "N/A"))
         with col3:
             returns = result.get("returns", {})
-            st.metric("5D Return", f"{returns.get('5d', 0)*100:.1f}%" if returns.get('5d') else "N/A")
+            st.metric("3D Return", f"{returns.get('3d', 0)*100:.1f}%" if returns.get('3d') else "N/A")
         
         st.markdown("**Earnings Info:**")
         earnings = result.get("earnings", {})
@@ -370,7 +370,7 @@ def _display_tool_result(tool_name: str, result: dict):
         with col1:
             st.metric("Total Trades", result.get("total_trades", 0))
         with col2:
-            returns = result.get("returns_5d", {})
+            returns = result.get("returns_3d", {})
             st.metric("Total Return", f"{returns.get('total', 0):.1f}%")
         with col3:
             st.metric("Avg Return", f"{returns.get('average', 0):.2f}%")
@@ -398,7 +398,7 @@ def _display_tool_result(tool_name: str, result: dict):
             st.metric("Total Trades", result.get("total_trades", 0))
         with col2:
             normal = result.get("normal_model", {})
-            st.metric("Normal 5D Return", f"{normal.get('total_return_pct', 0):.1f}%")
+            st.metric("Normal 3D Return", f"{normal.get('total_return_pct', 0):.1f}%")
         with col3:
             strategy = result.get("strategy_model", {})
             st.metric("Strategy Return", f"{strategy.get('total_return_pct', 0):.1f}%")

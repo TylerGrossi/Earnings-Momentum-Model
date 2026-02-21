@@ -12,9 +12,9 @@ def render_earnings_analysis_tab(returns_df, filter_stats):
     st.subheader("Earnings Surprise Analysis")
     st.markdown("Analyze how earnings beats/misses and surprise magnitude affect stock returns")
     
-    # Use the filtered returns_df
+    # returns_df is already filtered by data_loader (Date Check, 3D Return, Forward P/E <= 15 from returns_tracker.csv)
     analysis_df = returns_df.copy() if returns_df is not None else None
-    
+
     if analysis_df is None or analysis_df.empty:
         st.warning("No returns data available. Please ensure returns_tracker.csv is accessible.")
         
@@ -29,8 +29,8 @@ def render_earnings_analysis_tab(returns_df, filter_stats):
         if 'EPS Surprise (%)' in analysis_df.columns:
             analysis_df['EPS Surprise (%)'] = pd.to_numeric(analysis_df['EPS Surprise (%)'], errors='coerce')
         
-        # Use 5D Return
-        return_col = '5D Return'
+        # Use 3D Return
+        return_col = '3D Return'
         
         # Convert returns to percentage for display
         analysis_df[return_col] = pd.to_numeric(analysis_df[return_col], errors='coerce') * 100
@@ -139,20 +139,20 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
         )
         return (pr * 100) if pr is not None else None
     
-    # Main view only: buckets with 5D average return (no dropdowns, no drilldown)
+    # Main view only: buckets with 3D average return (no dropdowns, no drilldown)
     bucket_order = ['< -10%', '-10% to -5%', '-5% to 0%', '0% to 5%', '5% to 10%', '10% to 20%', '> 20%']
     bucket_stats = scatter_df.groupby('Surprise Bucket')[return_col].agg(['mean', 'count']).round(2)
-    bucket_stats = bucket_stats.rename(columns={'mean': '5D Average Return (%)', 'count': 'Count'})
+    bucket_stats = bucket_stats.rename(columns={'mean': '3D Average Return (%)', 'count': 'Count'})
     bucket_stats = bucket_stats.reset_index()
     bucket_stats['sort_order'] = bucket_stats['Surprise Bucket'].apply(
         lambda x: bucket_order.index(x) if x in bucket_order else 99
     )
     bucket_stats = bucket_stats.sort_values('sort_order').drop(columns=['sort_order'])
-    display_stats = bucket_stats[['Surprise Bucket', '5D Average Return (%)']].copy()
+    display_stats = bucket_stats[['Surprise Bucket', '3D Average Return (%)']].copy()
 
     col1, col2 = st.columns([1.5, 1])
     with col1:
-        y_vals = display_stats['5D Average Return (%)']
+        y_vals = display_stats['3D Average Return (%)']
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=display_stats['Surprise Bucket'],
@@ -166,9 +166,9 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
         y_max = y_valid.max() if len(y_valid) > 0 else 5
         y_padding = (y_max - y_min) * 0.2 if y_max != y_min else 5
         fig.update_layout(
-            title="5D Average Return by EPS Surprise Bucket",
+            title="3D Average Return by EPS Surprise Bucket",
             xaxis_title="EPS Surprise %",
-            yaxis_title="5D Average Return (%)",
+            yaxis_title="3D Average Return (%)",
             plot_bgcolor='rgba(0,0,0,0)',
             paper_bgcolor='rgba(0,0,0,0)',
             font_color='#94a3b8',
@@ -184,10 +184,10 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
             display_stats,
             width="stretch",
             hide_index=True,
-            column_config={"5D Average Return (%)": st.column_config.NumberColumn(format="%.2f%%")}
+            column_config={"3D Average Return (%)": st.column_config.NumberColumn(format="%.2f%%")}
         )
     
-    # Simple Beat vs Miss summary (portfolio return, not sum of returns)
+    # Simple Beat vs Miss: 3D average (mean return per trade) to match Power BI and Stop Loss
     st.markdown("---")
     st.markdown("#### Simple Beat vs Miss (Any Amount)")
     
@@ -197,29 +197,29 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
     )
     beat_df = known_df[known_df['Beat/Miss'] == 'Beat']
     miss_df = known_df[known_df['Beat/Miss'] == 'Miss']
-    beat_port_pct = _portfolio_return_pct(beat_df, return_col)
-    miss_port_pct = _portfolio_return_pct(miss_df, return_col)
     beat_count = len(beat_df)
     miss_count = len(miss_df)
-    spread = (beat_df[return_col].mean() - miss_df[return_col].mean()) if beat_count > 0 and miss_count > 0 else 0
+    beat_avg_3d = beat_df[return_col].mean() if beat_count > 0 else None
+    miss_avg_3d = miss_df[return_col].mean() if miss_count > 0 else None
+    spread = (beat_avg_3d - miss_avg_3d) if beat_count > 0 and miss_count > 0 and beat_avg_3d is not None and miss_avg_3d is not None else 0
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if beat_count > 0:
-            val = f"{beat_port_pct:+.2f}%" if beat_port_pct is not None else "N/A"
+        if beat_count > 0 and beat_avg_3d is not None:
+            val = f"{beat_avg_3d:+.2f}%"
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-value metric-green">{val}</div>
-                <div class="metric-label">Beat portfolio return ({beat_count} trades)</div>
+                <div class="metric-label">Beat 3D average ({beat_count} trades)</div>
             </div>
             """, unsafe_allow_html=True)
     with col2:
-        if miss_count > 0:
-            val = f"{miss_port_pct:+.2f}%" if miss_port_pct is not None else "N/A"
+        if miss_count > 0 and miss_avg_3d is not None:
+            val = f"{miss_avg_3d:+.2f}%"
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-value metric-red">{val}</div>
-                <div class="metric-label">Miss portfolio return ({miss_count} trades)</div>
+                <div class="metric-label">Miss 3D average ({miss_count} trades)</div>
             </div>
             """, unsafe_allow_html=True)
     with col3:
@@ -227,7 +227,7 @@ def _render_beat_vs_miss(analysis_df, return_col, valid_surprise, total_trades):
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-value metric-blue">{spread:+.2f}%</div>
-                <div class="metric-label">Beat - Miss avg spread</div>
+                <div class="metric-label">Beat - Miss 3D avg spread</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -243,16 +243,16 @@ def _render_surprise_magnitude(analysis_df, return_col, valid_surprise, total_tr
     scatter_df = analysis_df[
         analysis_df['EPS Surprise (%)'].notna() & 
         analysis_df[return_col].notna() &
-        (analysis_df['EPS Surprise (%)'] >= -100) &
-        (analysis_df['EPS Surprise (%)'] <= 100)
+        (analysis_df['EPS Surprise (%)'] >= -500) &
+        (analysis_df['EPS Surprise (%)'] <= 500)
     ].copy()
     
     outliers = analysis_df[
         analysis_df['EPS Surprise (%)'].notna() & 
-        ((analysis_df['EPS Surprise (%)'] < -100) | (analysis_df['EPS Surprise (%)'] > 100))
+        ((analysis_df['EPS Surprise (%)'] < -500) | (analysis_df['EPS Surprise (%)'] > 500))
     ]
     if len(outliers) > 0:
-        st.caption(f"Note: {len(outliers)} outliers with EPS Surprise outside -100% to 100% range excluded from chart")
+        st.caption(f"Note: {len(outliers)} outliers with EPS Surprise outside -500% to 500% range excluded from chart")
     
     if len(scatter_df) > 5:
         col1, col2 = st.columns([2, 1])
@@ -285,7 +285,7 @@ def _render_surprise_magnitude(analysis_df, return_col, valid_surprise, total_tr
                 name='Trades'
             ))
             
-            x_line = np.array([-100, 100])
+            x_line = np.array([-500, 500])
             y_line = slope * x_line + intercept
             fig.add_trace(go.Scatter(
                 x=x_line,
@@ -301,7 +301,7 @@ def _render_surprise_magnitude(analysis_df, return_col, valid_surprise, total_tr
                 paper_bgcolor='rgba(0,0,0,0)',
                 font_color='#94a3b8',
                 height=500,
-                xaxis=dict(range=[-100, 100], title='EPS Surprise (%)'),
+                xaxis=dict(range=[-500, 500], title='EPS Surprise (%)'),
                 yaxis=dict(title=f'{return_col} (%)'),
                 showlegend=True,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)

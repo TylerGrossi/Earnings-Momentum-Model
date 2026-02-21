@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
+from utils import filter_returns_by_forward_pe
+
 # Eastern time (EST/EDT) for "this week" so behavior is consistent on any server (e.g. Streamlit Cloud UTC)
 try:
     from zoneinfo import ZoneInfo
@@ -74,18 +76,20 @@ def load_hourly_prices_raw():
 
 def apply_consistent_filtering(returns_df, hourly_df):
     """
-    Apply consistent filtering across all datasets:
+    Apply consistent filtering across all datasets (using only columns from returns_tracker.csv):
     1. Remove tickers where Date Check = 'DATE PASSED' (from returns_tracker)
-    2. Only include tickers with valid 5D Return data
+    2. Only include tickers with valid 3D Return data
+    3. Only include rows where Forward P/E <= 15 or N/A/negative (using returns_tracker's Forward P/E / P/E)
     
-    Returns filtered dataframes and filter statistics.
+    Returns filtered dataframes and filter statistics. Aligns with Power BI when it filters on the same CSV.
     """
     filter_stats = {
         'original_returns_count': 0,
         'original_hourly_trades': 0,
         'date_passed_tickers': [],
         'date_passed_count': 0,
-        'no_5d_return_count': 0,
+        'no_3d_return_count': 0,
+        'low_pe_filter_count': 0,
         'final_count': 0,
         'final_tickers': []
     }
@@ -98,7 +102,7 @@ def apply_consistent_filtering(returns_df, hourly_df):
     filter_stats['date_passed_tickers'] = date_passed_tickers
     filter_stats['date_passed_count'] = len(date_passed_tickers)
     
-    # Filter returns_df
+    # Filter returns_df (all criteria use returns_tracker columns only)
     filtered_returns = None
     if returns_df is not None and not returns_df.empty:
         filter_stats['original_returns_count'] = len(returns_df)
@@ -109,11 +113,16 @@ def apply_consistent_filtering(returns_df, hourly_df):
         else:
             filtered_returns = returns_df.copy()
         
-        # Step 2: Only keep rows with valid 5D Return
-        if '5D Return' in filtered_returns.columns:
-            before_5d_filter = len(filtered_returns)
-            filtered_returns = filtered_returns[filtered_returns['5D Return'].notna()].copy()
-            filter_stats['no_5d_return_count'] = before_5d_filter - len(filtered_returns)
+        # Step 2: Only keep rows with valid 3D Return
+        if '3D Return' in filtered_returns.columns:
+            before_3d_filter = len(filtered_returns)
+            filtered_returns = filtered_returns[filtered_returns['3D Return'].notna()].copy()
+            filter_stats['no_3d_return_count'] = before_3d_filter - len(filtered_returns)
+        
+        # Step 3: Forward P/E <= 15 or N/A (using returns_tracker.csv columns only)
+        before_pe_filter = len(filtered_returns)
+        filtered_returns = filter_returns_by_forward_pe(filtered_returns)
+        filter_stats['low_pe_filter_count'] = before_pe_filter - len(filtered_returns)
         
         filter_stats['final_count'] = len(filtered_returns)
         filter_stats['final_tickers'] = filtered_returns['Ticker'].unique().tolist()
@@ -129,7 +138,7 @@ def apply_consistent_filtering(returns_df, hourly_df):
         else:
             filtered_hourly = hourly_df.copy()
         
-        # Step 2: Only keep tickers that have valid 5D Return in returns_df
+        # Step 2: Only keep tickers that have valid 3D Return in returns_df
         if filtered_returns is not None:
             valid_ticker_dates = filtered_returns[['Ticker', 'Earnings Date']].drop_duplicates()
             valid_ticker_dates['key'] = valid_ticker_dates['Ticker'] + '_' + valid_ticker_dates['Earnings Date'].astype(str)
@@ -140,16 +149,22 @@ def apply_consistent_filtering(returns_df, hourly_df):
     return filtered_returns, filtered_hourly, filter_stats
 
 
+# Bump this when changing filter logic so Streamlit cache is invalidated (e.g. Forward P/E filter)
+_FILTER_CACHE_VERSION = 4
+
+
 @st.cache_data(ttl=3600)
-def load_and_filter_all_data():
-    """Load and filter all data with consistent filtering."""
+def load_and_filter_all_data(_cache_version=None):
+    """Load and filter all data with consistent filtering (Date Check, 3D Return, Forward P/E <= 15)."""
+    if _cache_version is None:
+        _cache_version = _FILTER_CACHE_VERSION
     returns_df = load_returns_data_raw()
     hourly_df = load_hourly_prices_raw()
-    
+
     filtered_returns, filtered_hourly, filter_stats = apply_consistent_filtering(
         returns_df, hourly_df
     )
-    
+
     return {
         'returns': filtered_returns,
         'hourly': filtered_hourly,

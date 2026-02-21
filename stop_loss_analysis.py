@@ -12,10 +12,10 @@ SL_LEVELS_PCT = [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -12, -14, -16, -18, -2
 
 
 @st.cache_data(ttl=3600)
-def run_comparative_analysis(hourly_df, returns_df, max_days=5):
+def run_comparative_analysis(hourly_df, returns_df, max_days=3):
     """
     Automated backtest over SL_LEVELS_PCT. Cached so changing the dropdown doesn't re-run the backtest.
-    Filters: Valid 5D return and Date Passed (>7 days ago).
+    Filters: Valid 3D return and Date Passed (>7 days ago).
     """
     if hourly_df is None or hourly_df.empty or returns_df is None or returns_df.empty:
         return pd.DataFrame()
@@ -28,15 +28,15 @@ def run_comparative_analysis(hourly_df, returns_df, max_days=5):
     today = datetime.now().date()
     sl_levels = [x / 100.0 for x in SL_LEVELS_PCT]
     
-    # Target 174 tickers (completed trades only)
+    # Completed trades only (have 3D return)
     valid_trades = returns_df[
-        (returns_df['5D Return'].notna()) & 
+        (returns_df['3D Return'].notna()) & 
         (returns_df['Earnings Date'] <= (today - timedelta(days=7)))
     ]
     
     analysis_results = []
     for _, trade in valid_trades.iterrows():
-        ticker, e_date, normal_5d = trade['Ticker'], trade['Earnings Date'], trade['5D Return']
+        ticker, e_date, normal_3d = trade['Ticker'], trade['Earnings Date'], trade['3D Return']
         
         trade_data = hourly_df[
             (hourly_df['Ticker'] == ticker) & 
@@ -51,7 +51,7 @@ def run_comparative_analysis(hourly_df, returns_df, max_days=5):
         if exit_day_data.empty: continue
         
         close_ret = exit_day_data['Return From Earnings (%)'].iloc[-1] / 100
-        row = {'Ticker': ticker, 'Date': e_date, 'Normal Model (5D)': normal_5d}
+        row = {'Ticker': ticker, 'Date': e_date, 'Normal Model (3D)': normal_3d}
         
         for sl in sl_levels:
             label = f"SL {int(sl*100)}%"  # e.g. SL -10%
@@ -70,7 +70,7 @@ def run_comparative_analysis(hourly_df, returns_df, max_days=5):
     return pd.DataFrame(analysis_results)
 
 
-def _get_sl_result_and_trigger(hourly_df, ticker, e_date, sl_pct, max_days=5):
+def _get_sl_result_and_trigger(hourly_df, ticker, e_date, sl_pct, max_days=3):
     """
     For one trade and one stop-loss level: return (final_return, trigger_label).
     Uses same logic as run_comparative_analysis: first-candle gap down = take actual loss, not SL.
@@ -117,12 +117,13 @@ def _get_sl_result_and_trigger(hourly_df, ticker, e_date, sl_pct, max_days=5):
                 trigger_label = "Gap down (pre-open)" if (first_candle and h_ret < sl) else "Triggered"
             return final_ret, trigger_label
         first_candle = False
-    return close_ret, "No trigger (5D hold)"
+    return close_ret, "No trigger (3D hold)"
 
 
 def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
     st.subheader("Stop Loss Optimization")
-    
+    # returns_df is already filtered by data_loader (Date Check, 3D Return, Forward P/E <= 15 from returns_tracker.csv)
+
     if (hourly_df is None or hourly_df.empty) and os.path.exists("hourly_prices.csv"):
         hourly_df = pd.read_csv("hourly_prices.csv")
     
@@ -142,7 +143,7 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
         trades_meta['Earnings Date'] = pd.to_datetime(trades_meta['Date'])
 
         # Portfolio return for each strategy (Total Net Profit / Max Capital HWM) — quant model
-        base_col = 'Normal Model (5D)'
+        base_col = 'Normal Model (3D)'
         sl_cols = [c for c in master_results.columns if "SL" in c]
         port_ret_normal, _ = compute_portfolio_return_for_return_series(
             trades_meta, master_results[base_col], earnings_date_col='Earnings Date', timing_col='Earnings Timing'
@@ -161,29 +162,33 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
         use_stop_loss = best_portfolio_return > port_ret_normal
         recommended_label = best_sl_col.replace("SL ", "") if use_stop_loss else "No stop loss"
         best_strategy_col = best_sl_col if use_stop_loss else base_col
-        # Summary metrics use 5D Average (mean return per trade), not portfolio return
-        avg_normal_5d = master_results[base_col].mean() * 100
-        avg_optimized_5d = master_results[best_strategy_col].mean() * 100
-        alpha_delta_avg = avg_optimized_5d - avg_normal_5d if use_stop_loss else 0.0
+        # Normal 3D Average = mean(3D Return) over full universe (152) to match Power BI "Average 3D Return"
+        rd_3d = returns_df['3D Return'].dropna() if returns_df is not None and '3D Return' in returns_df.columns else pd.Series(dtype=float)
+        avg_normal_3d = (rd_3d.mean() * 100) if len(rd_3d) > 0 else (master_results[base_col].mean() * 100)
+        # Optimized = same as normal when no stop loss; otherwise backtest average with best SL
+        avg_optimized_3d = avg_normal_3d if not use_stop_loss else (master_results[best_strategy_col].mean() * 100)
+        alpha_delta_avg = avg_optimized_3d - avg_normal_3d if use_stop_loss else 0.0
 
-        # 1. Summary Metrics (5D Average = mean return per trade)
+        # 1. Summary Metrics (3D Average = mean return per trade)
+        # Total Trades = full universe (match Earnings Analysis); backtest runs on subset with hourly data and earnings >7 days ago
+        total_universe = len(returns_df) if returns_df is not None else 0
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Trades", len(master_results))
-        c2.metric("Normal 5D Average", f"{avg_normal_5d:+.2f}%")
+        c1.metric("Total Trades", total_universe)
+        c2.metric("Normal 3D Average", f"{avg_normal_3d:+.2f}%")
         c3.metric("Recommendation", recommended_label)
-        c4.metric("Optimized 5D Average", f"{avg_optimized_5d:+.2f}%",
+        c4.metric("Optimized 3D Average", f"{avg_optimized_3d:+.2f}%",
                   delta=f"{alpha_delta_avg:+.2f}% Alpha" if use_stop_loss else "No improvement")
         st.markdown("---")
 
         # 2. Performance Comparison Matrix — Avg Return second, no Total Return column
         st.markdown("### Performance Comparison Matrix")
-        # Alpha vs Normal = (avg 5D return with stop loss) − (avg 5D return normal)
+        # Alpha vs Normal = (avg return with stop loss) − (Normal 3D Average from full universe)
         matrix_df = pd.DataFrame([
             {
                 "SL_Value": int(col.replace("SL ", "").replace("%", "")),
                 "Strategy": col,
                 "Avg Return (%)": round(master_results[col].mean() * 100, 2),
-                "Alpha vs Normal (%)": round(master_results[col].mean() * 100 - avg_normal_5d, 2),
+                "Alpha vs Normal (%)": round(master_results[col].mean() * 100 - avg_normal_3d, 2),
                 "Win Rate (%)": round((master_results[col] > 0).mean() * 100, 1),
             } for col in sl_cols
         ]).sort_values("SL_Value", ascending=False)
@@ -201,7 +206,7 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
             }
         )
 
-        # Per-trade table: choose stop loss type, show 5D return, return with that SL, and hour SL triggered (gap down = take loss before open)
+        # Per-trade table: choose stop loss type, show 3D return, return with that SL, and hour SL triggered (gap down = take loss before open)
         st.markdown("### Per-trade returns by stop loss")
         sl_options = ["No stop loss"] + [f"SL {x}%" for x in SL_LEVELS_PCT]
         default_ix = 0
@@ -216,14 +221,14 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
         if selected_sl_label == "No stop loss":
             selected_col = base_col
             per_trade = master_results[["Ticker", "Date", base_col]].copy()
-            per_trade["5D Return (%)"] = (per_trade[base_col] * 100).round(2)
+            per_trade["3D Return (%)"] = (per_trade[base_col] * 100).round(2)
             per_trade["Return with selected SL (%)"] = (per_trade[base_col] * 100).round(2)
             per_trade["SL trigger hour"] = "—"
         else:
             selected_col = selected_sl_label
             sl_pct = int(selected_sl_label.replace("SL ", "").replace("%", ""))
             per_trade = master_results[["Ticker", "Date", base_col]].copy()
-            per_trade["5D Return (%)"] = (per_trade[base_col] * 100).round(2)
+            per_trade["3D Return (%)"] = (per_trade[base_col] * 100).round(2)
             per_trade["Return with selected SL (%)"] = (master_results[selected_col] * 100).round(2)
             h_df = hourly_df.copy()
             h_df["Earnings Date"] = pd.to_datetime(h_df["Earnings Date"]).dt.date
@@ -234,23 +239,23 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
             per_trade["SL trigger hour"] = triggers
         per_trade = per_trade.drop(columns=[base_col])
 
-        # Saved vs 5D = SL level − 5D return (when triggered at SL). Lost vs 5D = gap return − 5D return (when gap down).
+        # Saved vs 3D = SL level − 3D return (when triggered at SL). Lost vs 3D = gap return − 3D return (when gap down).
         trigger_hr = per_trade["SL trigger hour"].astype(str)
         triggered_at_sl = trigger_hr.str.match(r"^Day \d", na=False)
         gap_down = trigger_hr.str.contains("Gap down", na=False)
         no_trigger = trigger_hr.str.contains("No trigger", na=False)
-        five_d = per_trade["5D Return (%)"]
+        three_d = per_trade["3D Return (%)"]
         ret_sl = per_trade["Return with selected SL (%)"]
         if selected_sl_label == "No stop loss":
-            per_trade["Saved vs 5D (%)"] = np.nan
-            per_trade["Lost vs 5D (%)"] = np.nan
+            per_trade["Saved vs 3D (%)"] = np.nan
+            per_trade["Lost vs 3D (%)"] = np.nan
         else:
             sl_pct = int(selected_sl_label.replace("SL ", "").replace("%", ""))
-            per_trade["Saved vs 5D (%)"] = np.where(triggered_at_sl, (sl_pct - five_d).round(2), np.nan)
-            per_trade["Lost vs 5D (%)"] = np.where(gap_down, (ret_sl - five_d).round(2), np.nan)
+            per_trade["Saved vs 3D (%)"] = np.where(triggered_at_sl, (sl_pct - three_d).round(2), np.nan)
+            per_trade["Lost vs 3D (%)"] = np.where(gap_down, (ret_sl - three_d).round(2), np.nan)
 
         # Ensure all return columns display with 2 decimal places
-        for col in ["5D Return (%)", "Return with selected SL (%)", "Saved vs 5D (%)", "Lost vs 5D (%)"]:
+        for col in ["3D Return (%)", "Return with selected SL (%)", "Saved vs 3D (%)", "Lost vs 3D (%)"]:
             if col in per_trade.columns:
                 per_trade[col] = pd.to_numeric(per_trade[col], errors="coerce").round(2)
         per_trade = per_trade.sort_values("Date", ascending=False)
@@ -262,10 +267,10 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
             total_lost_gap_str = "—"
             card3_label = "Avg return (all trades)"
             card3_value = f"{avg_return_all:+.2f}% ({len(per_trade)} trades)"
-            card3_help = "Average 5D return across all trades (no stop loss). Matches matrix."
+            card3_help = "Average 3D return across all trades (no stop loss). Matches matrix."
         else:
-            saved_vals = per_trade.loc[triggered_at_sl, "Saved vs 5D (%)"]
-            lost_vals = per_trade.loc[gap_down, "Lost vs 5D (%)"]
+            saved_vals = per_trade.loc[triggered_at_sl, "Saved vs 3D (%)"]
+            lost_vals = per_trade.loc[gap_down, "Lost vs 3D (%)"]
             avg_saved = saved_vals.mean() if triggered_at_sl.any() else np.nan
             avg_lost = lost_vals.mean() if gap_down.any() else np.nan
             n_saved = triggered_at_sl.sum()
@@ -273,26 +278,26 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
             total_saved_str = f"{avg_saved:+.2f}% ({n_saved})" if pd.notna(avg_saved) else "—"
             total_lost_gap_str = f"{avg_lost:+.2f}% ({n_lost})" if pd.notna(avg_lost) else "—"
             other_count = no_trigger.sum()
-            other_avg = five_d[no_trigger].mean() if other_count else np.nan
+            other_avg = three_d[no_trigger].mean() if other_count else np.nan
             card3_label = "Avg return (all trades)"
             card3_value = f"{avg_return_all:+.2f}% ({len(per_trade)} trades)"
             card3_help = (
                 f"Average return with this SL across all trades — matches the matrix row for {selected_sl_label}. "
-                f"Of these, {other_count} held to 5D (avg {other_avg:+.2f}%)."
+                f"Of these, {other_count} held to 3D (avg {other_avg:+.2f}%)."
             ) if other_count and pd.notna(other_avg) else (
                 f"Average return with this SL across all trades — matches the matrix row for {selected_sl_label}."
-                + (f" Of these, {other_count} held to 5D." if other_count else "")
+                + (f" Of these, {other_count} held to 3D." if other_count else "")
             )
         # Formula + explanation for metric tooltips (question marks)
         help_avg_saved = (
-            "Formula: mean(SL_level − 5D_return) over trades that triggered at the stop.\n\n"
-            "Meaning: For each trade where the stop was hit (not a gap down), we take (stop level − 5D return). "
-            "A positive value means the 5D return was worse than the stop—you 'saved' by exiting at the stop instead of holding to day 5."
+            "Formula: mean(SL_level − 3D_return) over trades that triggered at the stop.\n\n"
+            "Meaning: For each trade where the stop was hit (not a gap down), we take (stop level − 3D return). "
+            "A positive value means the 3D return was worse than the stop—you 'saved' by exiting at the stop instead of holding to day 3."
         )
         help_avg_lost_gap = (
-            "Formula: mean(return_at_gap − 5D_return) over trades that had a gap down.\n\n"
+            "Formula: mean(return_at_gap − 3D_return) over trades that had a gap down.\n\n"
             "Meaning: When price gaps down before the open, you get the gap return instead of the stop. "
-            "This metric is the average difference between that gap return and the 5D return. Negative means you lost more by gapping down than you would have by holding to 5D."
+            "This metric is the average difference between that gap return and the 3D return. Negative means you lost more by gapping down than you would have by holding to 3D."
         )
         help_avg_return_all = (
             "Formula: mean(Return with selected SL) over all trades.\n\n"
@@ -309,13 +314,13 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
 
         col_config = {
             "Date": st.column_config.DateColumn(format="YYYY-MM-DD"),
-            "5D Return (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+            "3D Return (%)": st.column_config.NumberColumn(format="%+.2f%%"),
             "Return with selected SL (%)": st.column_config.NumberColumn(format="%+.2f%%"),
         }
-        if "Saved vs 5D (%)" in per_trade.columns:
-            col_config["Saved vs 5D (%)"] = st.column_config.NumberColumn(format="%+.2f%%")
-        if "Lost vs 5D (%)" in per_trade.columns:
-            col_config["Lost vs 5D (%)"] = st.column_config.NumberColumn(format="%+.2f%%")
+        if "Saved vs 3D (%)" in per_trade.columns:
+            col_config["Saved vs 3D (%)"] = st.column_config.NumberColumn(format="%+.2f%%")
+        if "Lost vs 3D (%)" in per_trade.columns:
+            col_config["Lost vs 3D (%)"] = st.column_config.NumberColumn(format="%+.2f%%")
         st.dataframe(per_trade, width="stretch", hide_index=True, column_config=col_config)
 
         # 3. Chart and Analysis Row
@@ -350,7 +355,7 @@ def render_stop_loss_tab(returns_df, hourly_df, filter_stats):
             else:
                 st.write("**Recommendation:** No stop loss")
                 st.write("None of the stop-loss levels improved portfolio return over the normal (no stop loss) model.")
-                st.info("Sticking with the normal 5D hold is optimal for this backtest. Re-run as more data accumulates to see if a stop loss becomes beneficial.")
+                st.info("Sticking with the normal 3D hold is optimal for this backtest. Re-run as more data accumulates to see if a stop loss becomes beneficial.")
 
     else:
         st.error("Missing hourly_prices.csv in repository.")

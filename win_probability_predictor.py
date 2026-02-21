@@ -130,11 +130,11 @@ def prepare_features(df):
     Rows where Date Check == "DATE PASSED" are removed before training.
     
     Args:
-        df: DataFrame with columns: P/E, Beta, Market Cap, Sector, Earnings Timing, 5D Return, Date Check
+        df: DataFrame with columns: P/E, Beta, Market Cap, Sector, Earnings Timing, 3D Return, Date Check
     
     Returns:
         X: Feature matrix
-        y: Target vector (1 if 5D Return > 0, else 0)
+        y: Target vector (1 if 3D Return > 0, else 0)
         feature_names: List of feature names
     """
     if not SKLEARN_AVAILABLE:
@@ -172,16 +172,16 @@ def prepare_features(df):
     # Filter to rows with all required features and valid target
     required_cols = ['P/E Numeric', 'Beta Numeric', 'Market Cap Numeric',
                      'P/E Category', 'Beta Category', 'Market Cap Category',
-                     'Sector', 'Earnings Timing', '5D Return']
+                     'Sector', 'Earnings Timing', '3D Return']
     
     df_clean = df[required_cols].copy()
-    df_clean = df_clean.dropna(subset=['P/E Numeric', 'Beta Numeric', 'Market Cap Numeric', '5D Return'])
+    df_clean = df_clean.dropna(subset=['P/E Numeric', 'Beta Numeric', 'Market Cap Numeric', '3D Return'])
     
     if len(df_clean) == 0:
         raise ValueError("No valid data rows after cleaning")
     
     # Create target variable (1 if positive return, 0 otherwise)
-    df_clean['Win'] = (df_clean['5D Return'] > 0).astype(int)
+    df_clean['Win'] = (df_clean['3D Return'] > 0).astype(int)
     
     # Encode categorical features
     le_pe = LabelEncoder()

@@ -217,7 +217,7 @@ def load_hourly_prices():
 
 
 def filter_data(returns_df):
-    """Apply standard filtering: remove DATE PASSED and require 5D Return."""
+    """Apply standard filtering: remove DATE PASSED and require 3D Return."""
     if returns_df is None or returns_df.empty:
         return pd.DataFrame()
     
@@ -226,8 +226,8 @@ def filter_data(returns_df):
     if 'Date Check' in df.columns:
         df = df[df['Date Check'] != 'DATE PASSED']
     
-    if '5D Return' in df.columns:
-        df = df[df['5D Return'].notna()]
+    if '3D Return' in df.columns:
+        df = df[df['3D Return'].notna()].copy()
     
     return df
 
@@ -303,13 +303,13 @@ def get_earnings_this_week() -> str:
 
 def _best_available_return(row, entry_f):
     """
-    Return (current_price, return_pct) using best available: Return to Today, then 1D..5D.
+    Return (current_price, return_pct) using best available: Return to Today, then 1D..3D.
     entry_f is the entry price (float). Returns (current_str, ret_str) for table cells.
     """
     if entry_f is None:
         return "—", "—"
     # Prefer Return to Today
-    for col in ["Return to Today", "1D Return", "2D Return", "3D Return", "4D Return", "5D Return"]:
+    for col in ["Return to Today", "1D Return", "2D Return", "3D Return"]:
         if col not in row or pd.isna(row.get(col)):
             continue
         try:
@@ -338,7 +338,7 @@ def _fetch_current_prices_yfinance(tickers):
         try:
             obj = yf.Ticker(sym)
             # Prefer last close from history (most reliable); fallback to fast_info
-            hist = obj.history(period="5d", interval="1d", auto_adjust=False)
+            hist = obj.history(period="3d", interval="1d", auto_adjust=False)
             if hist is not None and not hist.empty and "Close" in hist.columns:
                 last_close = float(hist["Close"].iloc[-1])
                 if last_close > 0:
@@ -516,7 +516,7 @@ def get_returns_this_week() -> str:
     elif current_prices:
         result += "Current prices from Gemini when available; otherwise tracker.\n\n"
     else:
-        result += "Returns use tracker data when available (Return to Today or 1D–5D).\n\n"
+        result += "Returns use tracker data when available (Return to Today or 1D–3D).\n\n"
     result += "## Returns Summary\n\n"
     result += (
         "The **Return** column is price movement from the tracking start to current/latest price. "
@@ -587,7 +587,7 @@ def get_returns_this_week() -> str:
         result += "\n"
 
     result += (
-        "For a specific ticker's full post-earnings breakdown (1D–5D), ask for that ticker by name."
+        "For a specific ticker's full post-earnings breakdown (1D–3D), ask for that ticker by name."
     )
     return result
 
@@ -646,7 +646,7 @@ def get_stock_details(ticker: str) -> str:
     result += f"- Status: {row.get('Date Check', 'N/A')}\n\n"
     
     result += "### Returns (from entry price)\n"
-    for day in ['1D', '2D', '3D', '4D', '5D']:
+    for day in ['1D', '2D', '3D']:
         ret = row.get(f'{day} Return')
         if pd.notna(ret):
             result += f"- {day} Return: {ret*100:+.2f}%\n"
@@ -663,21 +663,21 @@ def get_strategy_performance() -> str:
         return "Could not load data from GitHub."
     
     total_trades = len(df)
-    returns_5d = df['5D Return'].dropna() * 100
+    returns_3d = df['3D Return'].dropna() * 100
     
-    wins = (returns_5d > 0).sum()
+    wins = (returns_3d > 0).sum()
     win_rate = wins / total_trades * 100 if total_trades > 0 else 0
     
     result = "## Strategy Performance Summary\n\n"
     result += f"**Total Completed Trades:** {total_trades}\n\n"
     
     result += "### 5-Day Return Statistics\n"
-    result += f"- **Total Return:** {returns_5d.sum():+.1f}%\n"
-    result += f"- **Average Return:** {returns_5d.mean():+.2f}%\n"
-    result += f"- **Median Return:** {returns_5d.median():+.2f}%\n"
-    result += f"- **Std Deviation:** {returns_5d.std():.2f}%\n"
-    result += f"- **Best Trade:** {returns_5d.max():+.1f}%\n"
-    result += f"- **Worst Trade:** {returns_5d.min():+.1f}%\n\n"
+    result += f"- **Total Return:** {returns_3d.sum():+.1f}%\n"
+    result += f"- **Average Return:** {returns_3d.mean():+.2f}%\n"
+    result += f"- **Median Return:** {returns_3d.median():+.2f}%\n"
+    result += f"- **Std Deviation:** {returns_3d.std():.2f}%\n"
+    result += f"- **Best Trade:** {returns_3d.max():+.1f}%\n"
+    result += f"- **Worst Trade:** {returns_3d.min():+.1f}%\n\n"
     
     result += f"### Win Rate\n"
     result += f"- **Wins:** {wins} ({win_rate:.1f}%)\n"
@@ -697,7 +697,7 @@ def get_strategy_performance() -> str:
     if 'Sector' in df.columns:
         result += "### Top Sectors by Avg Return\n"
         sector_stats = df.groupby('Sector').agg({
-            '5D Return': ['count', 'mean']
+            '3D Return': ['count', 'mean']
         }).round(4)
         sector_stats.columns = ['Count', 'Avg Return']
         sector_stats['Avg Return'] = sector_stats['Avg Return'] * 100
@@ -709,7 +709,7 @@ def get_strategy_performance() -> str:
     return result
 
 
-def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> str:
+def run_backtest(stop_loss_pct: float = -10, holding_days: int = 3) -> str:
     """Run a backtest with custom parameters."""
     returns_df = filter_data(load_returns_data())
     hourly_df = load_hourly_prices()
@@ -729,7 +729,7 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> str:
     today = datetime.now().date()
     
     valid_trades = returns_df[
-        (returns_df['5D Return'].notna()) & 
+        (returns_df['3D Return'].notna()) & 
         (returns_df['Earnings Date'] <= (today - timedelta(days=7)))
     ]
     
@@ -739,7 +739,7 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> str:
     for _, trade in valid_trades.iterrows():
         ticker = trade['Ticker']
         e_date = trade['Earnings Date']
-        normal_return = trade['5D Return']
+        normal_return = trade['3D Return']
         
         trade_data = hourly_df[
             (hourly_df['Ticker'] == ticker) & 
@@ -803,7 +803,7 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> str:
     result += f"**Total Trades:** {len(results_df)}\n\n"
     
     result += "### Performance Comparison\n"
-    result += f"| Metric | Normal (5D Hold) | With Stop Loss |\n"
+    result += f"| Metric | Normal (3D Hold) | With Stop Loss |\n"
     result += f"|--------|------------------|----------------|\n"
     result += f"| Total Return | {normal_total:+.1f}% | {strategy_total:+.1f}% |\n"
     result += f"| Avg Return | {results_df['normal_return'].mean()*100:+.2f}% | {results_df['strategy_return'].mean()*100:+.2f}% |\n"
@@ -843,11 +843,11 @@ def compare_stop_losses() -> str:
     today = datetime.now().date()
     
     valid_trades = returns_df_copy[
-        (returns_df_copy['5D Return'].notna()) & 
+        (returns_df_copy['3D Return'].notna()) & 
         (returns_df_copy['Earnings Date'] <= (today - timedelta(days=7)))
     ]
     
-    normal_total = valid_trades['5D Return'].sum() * 100
+    normal_total = valid_trades['3D Return'].sum() * 100
     
     for sl_pct in range(-2, -22, -2):
         sl = sl_pct / 100.0
@@ -912,7 +912,7 @@ def get_beat_miss_analysis() -> str:
         return "No EPS surprise data available in the dataset."
     
     df = df[df['EPS Surprise (%)'].notna()].copy()
-    df['Return Pct'] = df['5D Return'] * 100
+    df['Return Pct'] = df['3D Return'] * 100
     
     beats = df[df['EPS Surprise (%)'] > 0]
     misses = df[df['EPS Surprise (%)'] < 0]
@@ -984,11 +984,11 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     if df.empty:
         return "Could not load data."
     
-    # Filter to most recent entry per ticker (keep all stocks, even without 5D return)
+    # Filter to most recent entry per ticker (keep all stocks, even without 3D return)
     df_all = df.sort_values('Earnings Date', ascending=False)
     df_all = df_all.drop_duplicates(subset=['Ticker'], keep='first')
     
-    # Find the target ticker (can be any stock, even without 5D return)
+    # Find the target ticker (can be any stock, even without 3D return)
     target_row = df_all[df_all['Ticker'].str.upper() == ticker.upper()]
     if target_row.empty:
         return f"Ticker {ticker.upper()} not found in the database."
@@ -996,7 +996,7 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     target_row = target_row.iloc[0]
     
     # For KNN comparison, use all stocks with required features
-    # But we'll filter results later to only show stocks with 5D returns
+    # But we'll filter results later to only show stocks with 3D returns
     df = df_all.copy()
     
     # Prepare features for KNN
@@ -1078,7 +1078,7 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     nbrs.fit(X_scaled)
     
     # Find neighbors (including itself, so we'll exclude it)
-    # Use a larger number to account for filtering out stocks without 5D returns
+    # Use a larger number to account for filtering out stocks without 3D returns
     max_neighbors = min(n_neighbors * 3, len(X_scaled))  # Get more candidates to filter
     nbrs_large = NearestNeighbors(n_neighbors=min(max_neighbors + 1, len(X_scaled)), algorithm='auto')
     nbrs_large.fit(X_scaled)
@@ -1088,14 +1088,14 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     candidate_indices = indices[0][1:]  # Skip first (itself)
     candidate_distances = distances[0][1:]
     
-    # Filter to only show stocks with 5D returns in the results
+    # Filter to only show stocks with 3D returns in the results
     similar_indices = []
     similar_distances = []
     
     for idx, dist in zip(candidate_indices, candidate_distances):
         similar_row = feature_df_valid.iloc[idx]
-        # Only include if it has 5D return data
-        if '5D Return' in similar_row and pd.notna(similar_row['5D Return']):
+        # Only include if it has 3D return data
+        if '3D Return' in similar_row and pd.notna(similar_row['3D Return']):
             similar_indices.append(idx)
             similar_distances.append(dist)
             # Stop once we have enough results
@@ -1103,7 +1103,7 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
                 break
     
     if len(similar_indices) == 0:
-        return f"Found similar stocks to {ticker.upper()}, but none of them have 5D return data available."
+        return f"Found similar stocks to {ticker.upper()}, but none of them have 3D return data available."
     
     # Calculate max distance for normalization (use the largest distance found)
     max_dist = max(similar_distances) if similar_distances else 1.0
@@ -1112,7 +1112,7 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     result = f"## Similar Stocks to {ticker.upper()}\n\n"
     
     # Create table header
-    result += "| Rank | Ticker | Company | Similarity | P/E | Beta | Market Cap | Sector | 5D Return |\n"
+    result += "| Rank | Ticker | Company | Similarity | P/E | Beta | Market Cap | Sector | 3D Return |\n"
     result += "|------|--------|---------|------------|-----|------|------------|--------|-----------|\n"
     
     # Add target ticker as first row (reference row)
@@ -1123,9 +1123,9 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     target_mcap = target_row.get('Market Cap', 'N/A')
     target_sector = target_row.get('Sector', 'N/A')
     
-    # Format target's 5D return
-    if '5D Return' in target_row and pd.notna(target_row['5D Return']):
-        target_return_str = f"{target_row['5D Return']*100:+.2f}%"
+    # Format target's 3D return
+    if '3D Return' in target_row and pd.notna(target_row['3D Return']):
+        target_return_str = f"{target_row['3D Return']*100:+.2f}%"
     else:
         target_return_str = "N/A"
     
@@ -1152,9 +1152,9 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
         mcap = similar_row.get('Market Cap', 'N/A')
         sector = similar_row.get('Sector', 'N/A')
         
-        # Format 5D return
-        if '5D Return' in similar_row and pd.notna(similar_row['5D Return']):
-            return_str = f"{similar_row['5D Return']*100:+.2f}%"
+        # Format 3D return
+        if '3D Return' in similar_row and pd.notna(similar_row['3D Return']):
+            return_str = f"{similar_row['3D Return']*100:+.2f}%"
         else:
             return_str = "N/A"
         
@@ -1309,30 +1309,30 @@ def get_risk_metrics() -> str:
     if df.empty:
         return "Could not load data for risk analysis."
     
-    returns_5d = df['5D Return'].dropna() * 100  # Convert to percentage
+    returns_3d = df['3D Return'].dropna() * 100  # Convert to percentage
     
     result = "## Strategy Risk Metrics\n\n"
     
     # Basic Stats
-    total_trades = len(returns_5d)
+    total_trades = len(returns_3d)
     result += f"Total Trades Analyzed: {total_trades}\n\n"
     
     # Drawdown Analysis
     result += "### Drawdown Analysis\n"
-    worst_trade = returns_5d.min()
-    worst_idx = df['5D Return'].idxmin()
+    worst_trade = returns_3d.min()
+    worst_idx = df['3D Return'].idxmin()
     worst_ticker = df.loc[worst_idx, 'Ticker'] if pd.notna(worst_idx) else 'N/A'
-    best_trade = returns_5d.max()
-    best_idx = df['5D Return'].idxmax()
+    best_trade = returns_3d.max()
+    best_idx = df['3D Return'].idxmax()
     best_ticker = df.loc[best_idx, 'Ticker'] if pd.notna(best_idx) else 'N/A'
     
     result += f"- Worst Single Trade: {worst_trade:.2f}% ({worst_ticker})\n"
     result += f"- Best Single Trade: {best_trade:.2f}% ({best_ticker})\n"
     
     # Count significant losses
-    losses_over_10 = (returns_5d < -10).sum()
-    losses_over_20 = (returns_5d < -20).sum()
-    losses_over_30 = (returns_5d < -30).sum()
+    losses_over_10 = (returns_3d < -10).sum()
+    losses_over_20 = (returns_3d < -20).sum()
+    losses_over_30 = (returns_3d < -30).sum()
     
     result += f"- Trades with > 10% loss: {losses_over_10} ({losses_over_10/total_trades*100:.1f}%)\n"
     result += f"- Trades with > 20% loss: {losses_over_20} ({losses_over_20/total_trades*100:.1f}%)\n"
@@ -1340,15 +1340,15 @@ def get_risk_metrics() -> str:
     
     # Volatility Metrics
     result += "### Volatility Metrics\n"
-    std_dev = returns_5d.std()
+    std_dev = returns_3d.std()
     result += f"- Standard Deviation: {std_dev:.2f}%\n"
     result += f"- Return Range: {worst_trade:.2f}% to {best_trade:.2f}%\n"
     
     # Percentiles
-    p5 = returns_5d.quantile(0.05)
-    p25 = returns_5d.quantile(0.25)
-    p75 = returns_5d.quantile(0.75)
-    p95 = returns_5d.quantile(0.95)
+    p5 = returns_3d.quantile(0.05)
+    p25 = returns_3d.quantile(0.25)
+    p75 = returns_3d.quantile(0.75)
+    p95 = returns_3d.quantile(0.95)
     
     result += f"- 5th Percentile (worst 5%): {p5:.2f}%\n"
     result += f"- 25th Percentile: {p25:.2f}%\n"
@@ -1357,7 +1357,7 @@ def get_risk_metrics() -> str:
     
     # Risk-Adjusted Returns
     result += "### Risk-Adjusted Metrics\n"
-    avg_return = returns_5d.mean()
+    avg_return = returns_3d.mean()
     
     # Sharpe-like ratio (simplified, assuming 0 risk-free rate)
     sharpe_like = avg_return / std_dev if std_dev > 0 else 0
@@ -1365,8 +1365,8 @@ def get_risk_metrics() -> str:
     result += f"- Return/Risk Ratio: {sharpe_like:.2f}\n"
     
     # Win/Loss Analysis
-    wins = returns_5d[returns_5d > 0]
-    losses = returns_5d[returns_5d < 0]
+    wins = returns_3d[returns_3d > 0]
+    losses = returns_3d[returns_3d < 0]
     
     avg_win = wins.mean() if len(wins) > 0 else 0
     avg_loss = losses.mean() if len(losses) > 0 else 0
@@ -1384,7 +1384,7 @@ def get_risk_metrics() -> str:
     result += "### Streak Analysis\n"
     
     # Calculate consecutive wins/losses
-    signs = (returns_5d > 0).astype(int)
+    signs = (returns_3d > 0).astype(int)
     max_consecutive_wins = 0
     max_consecutive_losses = 0
     current_wins = 0
@@ -1405,15 +1405,15 @@ def get_risk_metrics() -> str:
     
     # Worst 5 trades
     result += "### Worst 5 Trades\n"
-    worst_5 = df.nsmallest(5, '5D Return')[['Ticker', 'Earnings Date', '5D Return', 'Sector']].copy()
-    worst_5['5D Return'] = worst_5['5D Return'] * 100
+    worst_5 = df.nsmallest(5, '3D Return')[['Ticker', 'Earnings Date', '3D Return', 'Sector']].copy()
+    worst_5['3D Return'] = worst_5['3D Return'] * 100
     
     for _, row in worst_5.iterrows():
         ed = pd.to_datetime(row['Earnings Date']).strftime('%Y-%m-%d') if pd.notna(row['Earnings Date']) else 'N/A'
-        result += f"- {row['Ticker']}: {row['5D Return']:.2f}% ({ed}, {row.get('Sector', 'N/A')})\n"
+        result += f"- {row['Ticker']}: {row['3D Return']:.2f}% ({ed}, {row.get('Sector', 'N/A')})\n"
     
     result += "\n### Risk Summary\n"
-    result += f"This strategy has a {(returns_5d > 0).mean()*100:.1f}% win rate with an average return of {avg_return:.2f}% per trade. "
+    result += f"This strategy has a {(returns_3d > 0).mean()*100:.1f}% win rate with an average return of {avg_return:.2f}% per trade. "
     result += f"However, {losses_over_10} trades ({losses_over_10/total_trades*100:.1f}%) resulted in losses greater than 10%. "
     result += f"The worst single trade lost {worst_trade:.2f}%. Consider using stop losses to limit downside risk."
     
@@ -1593,9 +1593,9 @@ def analyze_by_filter(filter_type: str, filter_value: str) -> str:
         return f"No trades found matching filter: {filter_description}"
     
     total_trades = len(filtered_df)
-    returns_5d = filtered_df['5D Return'].dropna() * 100
+    returns_3d = filtered_df['3D Return'].dropna() * 100
     
-    if len(returns_5d) == 0:
+    if len(returns_3d) == 0:
         return f"No trades with return data found for filter: {filter_description}"
     
     # Build result
@@ -1603,33 +1603,33 @@ def analyze_by_filter(filter_type: str, filter_value: str) -> str:
     result += f"Total Trades: {total_trades}\n\n"
     
     result += "### Return Statistics\n"
-    result += f"- Total Return: {returns_5d.sum():.2f}%\n"
-    result += f"- Average Return: {returns_5d.mean():.2f}%\n"
-    result += f"- Median Return: {returns_5d.median():.2f}%\n"
-    result += f"- Std Deviation: {returns_5d.std():.2f}%\n"
-    result += f"- Best Trade: {returns_5d.max():.2f}%\n"
-    result += f"- Worst Trade: {returns_5d.min():.2f}%\n\n"
+    result += f"- Total Return: {returns_3d.sum():.2f}%\n"
+    result += f"- Average Return: {returns_3d.mean():.2f}%\n"
+    result += f"- Median Return: {returns_3d.median():.2f}%\n"
+    result += f"- Std Deviation: {returns_3d.std():.2f}%\n"
+    result += f"- Best Trade: {returns_3d.max():.2f}%\n"
+    result += f"- Worst Trade: {returns_3d.min():.2f}%\n\n"
     
     result += "### Win/Loss\n"
-    wins = (returns_5d > 0).sum()
-    win_rate = wins / len(returns_5d) * 100
-    result += f"- Win Rate: {win_rate:.1f}% ({wins}/{len(returns_5d)})\n"
+    wins = (returns_3d > 0).sum()
+    win_rate = wins / len(returns_3d) * 100
+    result += f"- Win Rate: {win_rate:.1f}% ({wins}/{len(returns_3d)})\n"
     
-    avg_win = returns_5d[returns_5d > 0].mean() if (returns_5d > 0).any() else 0
-    avg_loss = returns_5d[returns_5d < 0].mean() if (returns_5d < 0).any() else 0
+    avg_win = returns_3d[returns_3d > 0].mean() if (returns_3d > 0).any() else 0
+    avg_loss = returns_3d[returns_3d < 0].mean() if (returns_3d < 0).any() else 0
     result += f"- Average Win: {avg_win:.2f}%\n"
     result += f"- Average Loss: {avg_loss:.2f}%\n\n"
     
     # Compare to overall
-    all_returns = filter_data(load_returns_data())['5D Return'].dropna() * 100
+    all_returns = filter_data(load_returns_data())['3D Return'].dropna() * 100
     overall_avg = all_returns.mean()
     overall_win_rate = (all_returns > 0).mean() * 100
     
     result += "### Comparison to Overall Strategy\n"
-    result += f"- This filter avg return: {returns_5d.mean():.2f}% vs Overall: {overall_avg:.2f}%\n"
+    result += f"- This filter avg return: {returns_3d.mean():.2f}% vs Overall: {overall_avg:.2f}%\n"
     result += f"- This filter win rate: {win_rate:.1f}% vs Overall: {overall_win_rate:.1f}%\n"
     
-    diff = returns_5d.mean() - overall_avg
+    diff = returns_3d.mean() - overall_avg
     if diff > 0:
         result += f"- Outperforms overall by {diff:.2f}% per trade\n"
     else:
@@ -1637,12 +1637,12 @@ def analyze_by_filter(filter_type: str, filter_value: str) -> str:
     
     # List some example trades
     result += "\n### Sample Trades\n"
-    sample = filtered_df.head(5)[['Ticker', 'Earnings Date', '5D Return', 'Market Cap']].copy()
-    sample['5D Return'] = sample['5D Return'] * 100
+    sample = filtered_df.head(5)[['Ticker', 'Earnings Date', '3D Return', 'Market Cap']].copy()
+    sample['3D Return'] = sample['3D Return'] * 100
     
     for _, row in sample.iterrows():
         ed = pd.to_datetime(row['Earnings Date']).strftime('%Y-%m-%d') if pd.notna(row['Earnings Date']) else 'N/A'
-        result += f"- {row['Ticker']}: {row['5D Return']:.2f}% ({ed}, {row.get('Market Cap', 'N/A')})\n"
+        result += f"- {row['Ticker']}: {row['3D Return']:.2f}% ({ed}, {row.get('Market Cap', 'N/A')})\n"
     
     return result
 
@@ -1656,7 +1656,7 @@ SYSTEM_PROMPT = """You are an AI assistant for the Earnings Momentum Strategy, a
 IMPORTANT DATA CONTEXT:
 - The tracker stores HISTORICAL trades that already happened
 - "Earnings Date" in the tracker is when the stock HAD earnings (past tense)
-- Returns (1D, 2D, 3D, 4D, 5D) are the actual returns AFTER that earnings date
+- Returns (1D, 2D, 3D) are the actual returns AFTER that earnings date
 - You can also run a LIVE scanner to find stocks currently signaling
 
 You have access to the following tools:
@@ -1673,7 +1673,7 @@ You have access to the following tools:
 10. **compare_stop_losses** - Compares stop loss levels from -2% to -20%
 11. **get_beat_miss_analysis** - Analyzes historical performance by earnings beat vs miss
 11. **list_all_tickers** - Lists all tickers in the database
-12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Returns a MARKDOWN TABLE with columns: Rank, Ticker, Company, Similarity, P/E, Beta, Market Cap, Sector, 5D Return. When user asks for "table of returns", present this table as-is. Example: find_similar_tickers(AAPL, 5)
+12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Returns a MARKDOWN TABLE with columns: Rank, Ticker, Company, Similarity, P/E, Beta, Market Cap, Sector, 3D Return. When user asks for "table of returns", present this table as-is. Example: find_similar_tickers(AAPL, 5)
 
 When a user asks a question:
 1. Determine which tool(s) would help answer their question
@@ -1719,10 +1719,10 @@ CRITICAL TABLE FORMATTING RULES:
 - When a user asks for "table of returns" or "table with returns" or similar table requests:
   * ALWAYS include BOTH stats (P/E, Beta, Market Cap, Sector) AND returns in the table
   * Use proper markdown table format with pipes (|) and alignment
-  * Include columns: Ticker, Company, P/E, Beta, Market Cap, Sector, 5D Return (or other return metrics)
+  * Include columns: Ticker, Company, P/E, Beta, Market Cap, Sector, 3D Return (or other return metrics)
   * Do NOT create a table with only returns - always include the comparison stats
   * Example format:
-    | Ticker | Company | P/E | Beta | Market Cap | Sector | 5D Return |
+    | Ticker | Company | P/E | Beta | Market Cap | Sector | 3D Return |
     |--------|---------|-----|------|------------|--------|-----------|
     | AAPL   | Apple   | 28.5| 1.2  | $3.5T      | Tech   | +5.23%    |
 - The find_similar_tickers tool already returns a properly formatted table with stats and returns

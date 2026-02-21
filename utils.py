@@ -11,6 +11,55 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
+# Forward P/E filter: only include stocks with Forward P/E <= this, or N/A/negative
+FORWARD_PE_MAX = 15.0
+
+
+def is_forward_pe_low(pe_val):
+    """
+    Return True if the stock passes the low P/E filter: Forward P/E <= FORWARD_PE_MAX, or negative, or N/A.
+    Exclude only when we have a numeric Forward P/E and it is > FORWARD_PE_MAX.
+    """
+    if pd.isna(pe_val) or pe_val is None or pe_val == "" or str(pe_val).strip() == "N/A":
+        return True  # N/A → include
+    try:
+        val = float(pe_val)
+        return val <= FORWARD_PE_MAX  # negative or 0 or 1..15 → include; > 15 → exclude
+    except (TypeError, ValueError):
+        return True  # unparseable → include
+
+
+def _returns_tracker_pe_column(df, name):
+    """Return the actual column name in df that matches name (e.g. 'Forward P/E'), or None. Handles strip."""
+    if df is None or df.empty:
+        return None
+    for c in df.columns:
+        if str(c).strip() == name:
+            return c
+    return None
+
+
+def filter_returns_by_forward_pe(returns_df):
+    """
+    Filter to rows where Forward P/E <= 15, or Forward P/E is blank/N/A/negative.
+    Uses only the Forward P/E column from returns_tracker.csv (no P/E fallback)
+    so counts match Power BI, which only filters on Forward P/E <= 15.
+    """
+    if returns_df is None or returns_df.empty:
+        return returns_df
+    pe_col = _returns_tracker_pe_column(returns_df, "Forward P/E")
+    if pe_col is None:
+        return returns_df
+
+    def passes(row):
+        val = row.get(pe_col)
+        # Blank/N/A/missing → include (Power BI only filters on Forward P/E when present)
+        if pd.isna(val) or val is None or str(val).strip() == "" or str(val).strip() == "N/A":
+            return True
+        return is_forward_pe_low(val)
+
+    return returns_df[returns_df.apply(passes, axis=1)].copy()
+
 # ------------------------------------
 # FINVIZ SCRAPERS
 # ------------------------------------
@@ -37,19 +86,23 @@ def get_all_tickers():
 
 
 def get_finviz_data(ticker):
-    """Get stock data from Finviz for a single ticker."""
+    """Get stock data from Finviz for a single ticker. Uses the same table and key-value
+    parsing as Earnings Momentum Model.get_finviz_stats so Forward P/E (and P/E, Price, etc.)
+    come from the same spot."""
     url = f"https://finviz.com/quote.ashx?t={ticker}"
-    data = {"Ticker": ticker, "Earnings": "N/A", "Price": "N/A", "P/E": "N/A", "Beta": "N/A", "Market Cap": "N/A"}
+    data = {"Ticker": ticker, "Earnings": "N/A", "Price": "N/A", "P/E": "N/A", "Forward P/E": "N/A", "Beta": "N/A", "Market Cap": "N/A"}
     try:
         r = requests.get(url, headers=HEADERS, timeout=12)
         soup = BeautifulSoup(r.text, "html.parser")
-        for t in soup.select("table.snapshot-table2"):
-            tds = t.find_all("td")
-            for i in range(0, len(tds) - 1, 2):
-                k, v = tds[i].get_text(strip=True), tds[i + 1].get_text(strip=True)
-                if k in data and data[k] == "N/A":
-                    data[k] = v
-    except:
+        tables = soup.find_all("table")
+        if len(tables) > 8:
+            cells = tables[8].find_all("td")
+            # Same key-value extraction as Earnings Momentum Model.get_finviz_stats
+            finviz_dict = {cells[i].get_text(strip=True): cells[i + 1].get_text(strip=True) for i in range(0, len(cells), 2)}
+            for key in ("Price", "P/E", "Forward P/E", "Beta", "Market Cap", "Earnings"):
+                if key in finviz_dict and finviz_dict[key]:
+                    data[key] = finviz_dict[key]
+    except Exception:
         pass
     return data
 
@@ -202,32 +255,32 @@ def compute_portfolio_metrics(returns_df):
     """
     Compute portfolio metrics from returns_tracker-style DataFrame (aligned with Power BI).
 
-    Uses: Earnings Date, Earnings Timing, 5D Return.
-    - Total Net Profit = SUM(5D Return * CAPITAL_PER_TRADE)
+    Uses: Earnings Date, Earnings Timing, 3D Return.
+    - Total Net Profit = SUM(3D Return * CAPITAL_PER_TRADE)
     - Max Capital High Water Mark = max concurrent trades (after first week) * CAPITAL_PER_TRADE
     - Portfolio Return = Total Net Profit / Max Capital HWM
-    - Weekly average return = mean(5D Return) = sum(5D Return) / count(tickers with 5D not blank)
+    - Weekly average return = mean(3D Return) = sum(3D Return) / count(tickers with 3D not blank)
     - Annualized Return = (1 + Portfolio Return)^(365/days) - 1
 
     Returns dict with: weekly_avg_return, portfolio_return, annualized_return;
     or None if insufficient data.
 
-    weekly_avg_return = mean(5D Return) over all tickers with 5D Return not blank.
+    weekly_avg_return = mean(3D Return) over all tickers with 3D Return not blank.
     """
     if returns_df is None or returns_df.empty:
         return None
     df = returns_df.copy()
-    if '5D Return' not in df.columns or 'Earnings Date' not in df.columns:
+    if '3D Return' not in df.columns or 'Earnings Date' not in df.columns:
         return None
 
     df['Earnings Date'] = pd.to_datetime(df['Earnings Date'], errors='coerce')
-    df['5D Return'] = pd.to_numeric(df['5D Return'], errors='coerce')
-    closed = df[df['5D Return'].notna()].copy()
+    df['3D Return'] = pd.to_numeric(df['3D Return'], errors='coerce')
+    closed = df[df['3D Return'].notna()].copy()
     if closed.empty:
         return None
 
-    # Weekly average return = average of 5D returns (sum / count of tickers with 5D not blank)
-    weekly_avg_return = closed['5D Return'].mean()
+    # Weekly average return = average of 3D returns (sum / count of tickers with 3D not blank)
+    weekly_avg_return = closed['3D Return'].mean()
 
     timing_col = 'Earnings Timing' if 'Earnings Timing' in closed.columns else None
     closed['_buy_date'] = closed.apply(
@@ -239,7 +292,7 @@ def compute_portfolio_metrics(returns_df):
     if closed.empty:
         return None
 
-    total_net_profit = (closed['5D Return'] * CAPITAL_PER_TRADE).sum()
+    total_net_profit = (closed['3D Return'] * CAPITAL_PER_TRADE).sum()
     global_start = closed['_buy_date'].min()
     cutoff_date = global_start + timedelta(days=7)
     max_sell = closed['_sell_date'].max()

@@ -79,7 +79,7 @@ def load_hourly_prices():
 
 
 def filter_data(returns_df):
-    """Apply standard filtering: remove DATE PASSED and require 5D Return."""
+    """Apply standard filtering: remove DATE PASSED and require 3D Return."""
     if returns_df is None or returns_df.empty:
         return pd.DataFrame()
     
@@ -89,9 +89,9 @@ def filter_data(returns_df):
     if 'Date Check' in df.columns:
         df = df[df['Date Check'] != 'DATE PASSED']
     
-    # Require valid 5D Return
-    if '5D Return' in df.columns:
-        df = df[df['5D Return'].notna()]
+    # Require valid 3D Return
+    if '3D Return' in df.columns:
+        df = df[df['3D Return'].notna()]
     
     return df
 
@@ -151,7 +151,7 @@ def get_earnings_this_week() -> dict:
             "eps_estimate": row.get('EPS Estimate', 'N/A'),
             "reported_eps": row.get('Reported EPS', 'N/A'),
             "eps_surprise_pct": row.get('EPS Surprise (%)', 'N/A'),
-            "5d_return": row.get('5D Return', 'N/A')
+            "3d_return": row.get('3D Return', 'N/A')
         })
     
     return {
@@ -196,8 +196,6 @@ def get_stock_details(ticker: str) -> dict:
             "1d": row.get('1D Return'),
             "2d": row.get('2D Return'),
             "3d": row.get('3D Return'),
-            "4d": row.get('4D Return'),
-            "5d": row.get('5D Return'),
         },
         "technicals": {
             "beta": row.get('Beta'),
@@ -226,11 +224,11 @@ def get_strategy_performance() -> dict:
     
     total_trades = len(df)
     
-    # 5D Return stats
-    returns_5d = df['5D Return'].dropna() * 100  # Convert to percentage
+    # 3D Return stats
+    returns_3d = df['3D Return'].dropna() * 100  # Convert to percentage
     
     # Win rate
-    wins = (returns_5d > 0).sum()
+    wins = (returns_3d > 0).sum()
     win_rate = wins / total_trades * 100 if total_trades > 0 else 0
     
     # EPS surprise stats
@@ -242,7 +240,7 @@ def get_strategy_performance() -> dict:
     if 'Sector' in df.columns:
         for sector in df['Sector'].dropna().unique():
             sector_df = df[df['Sector'] == sector]
-            sector_returns = sector_df['5D Return'].dropna() * 100
+            sector_returns = sector_df['3D Return'].dropna() * 100
             if len(sector_returns) > 0:
                 sector_stats[sector] = {
                     "count": len(sector_df),
@@ -252,13 +250,13 @@ def get_strategy_performance() -> dict:
     
     return {
         "total_trades": total_trades,
-        "returns_5d": {
-            "total": round(returns_5d.sum(), 2),
-            "average": round(returns_5d.mean(), 2),
-            "median": round(returns_5d.median(), 2),
-            "std_dev": round(returns_5d.std(), 2),
-            "min": round(returns_5d.min(), 2),
-            "max": round(returns_5d.max(), 2),
+        "returns_3d": {
+            "total": round(returns_3d.sum(), 2),
+            "average": round(returns_3d.mean(), 2),
+            "median": round(returns_3d.median(), 2),
+            "std_dev": round(returns_3d.std(), 2),
+            "min": round(returns_3d.min(), 2),
+            "max": round(returns_3d.max(), 2),
         },
         "win_rate_pct": round(win_rate, 1),
         "beat_rate_pct": round(beat_rate, 1) if beat_rate else None,
@@ -266,7 +264,7 @@ def get_strategy_performance() -> dict:
     }
 
 
-def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> dict:
+def run_backtest(stop_loss_pct: float = -10, holding_days: int = 3) -> dict:
     """
     Run a backtest with custom parameters.
     
@@ -295,7 +293,7 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> dict:
     
     # Only completed trades
     valid_trades = returns_df[
-        (returns_df['5D Return'].notna()) & 
+        (returns_df['3D Return'].notna()) & 
         (returns_df['Earnings Date'] <= (today - timedelta(days=7)))
     ]
     
@@ -303,7 +301,7 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 5) -> dict:
     for _, trade in valid_trades.iterrows():
         ticker = trade['Ticker']
         e_date = trade['Earnings Date']
-        normal_return = trade['5D Return']
+        normal_return = trade['3D Return']
         
         trade_data = hourly_df[
             (hourly_df['Ticker'] == ticker) & 
@@ -398,7 +396,7 @@ def get_beat_miss_analysis() -> dict:
         return {"error": "No EPS surprise data available"}
     
     df = df[df['EPS Surprise (%)'].notna()].copy()
-    df['5D Return Pct'] = df['5D Return'] * 100
+    df['3D Return Pct'] = df['3D Return'] * 100
     
     beats = df[df['EPS Surprise (%)'] > 0]
     misses = df[df['EPS Surprise (%)'] < 0]
@@ -407,7 +405,7 @@ def get_beat_miss_analysis() -> dict:
     def calc_stats(subset, label):
         if len(subset) == 0:
             return None
-        returns = subset['5D Return Pct']
+        returns = subset['3D Return Pct']
         return {
             "category": label,
             "count": len(subset),

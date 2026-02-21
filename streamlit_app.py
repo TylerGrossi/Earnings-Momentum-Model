@@ -4,7 +4,7 @@ import streamlit as st
 from config import setup_page, apply_styling
 
 # Import data loader
-from data_loader import load_and_filter_all_data, load_returns_data_raw
+from data_loader import load_and_filter_all_data, load_returns_data_raw, _FILTER_CACHE_VERSION
 
 # Import tab renderers
 from stock_screener import render_stock_screener_tab
@@ -29,7 +29,7 @@ st.title("Earnings Momentum Strategy")
 # ------------------------------------
 # Load filtered data for analysis tabs
 try:
-    all_data = load_and_filter_all_data()
+    all_data = load_and_filter_all_data(_cache_version=_FILTER_CACHE_VERSION)
     returns_df = all_data['returns']
     hourly_df = all_data['hourly']
     filter_stats = all_data['filter_stats']
