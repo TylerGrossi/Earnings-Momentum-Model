@@ -670,13 +670,13 @@ def build_universe():
 # WIN PROBABILITY (for new tickers)
 # ------------------------------------
 
-def train_win_prob_model(existing_df):
-    """Train win probability model on existing returns_tracker data. Returns (model, encoders) or (None, None)."""
-    if not WIN_PROB_AVAILABLE or existing_df is None or existing_df.empty:
+def train_win_prob_model(train_df):
+    """Train win probability model on returns_tracker data. Returns (model, encoders) or (None, None)."""
+    if not WIN_PROB_AVAILABLE or train_df is None or train_df.empty:
         return None, None
     try:
-        # train_win_probability_model needs rows with 5D Return; uses same logic as win_probability_predictor
-        model, encoders, _ = train_win_probability_model(existing_df, model_type='random_forest')
+        # use_cache=False so training runs fresh when called from script (not Streamlit)
+        model, encoders, _ = train_win_probability_model(train_df, model_type='random_forest', use_cache=False)
         return model, encoders
     except (ValueError, ImportError) as e:
         print(f"  Win probability model training skipped: {e}")
@@ -757,7 +757,7 @@ def update_returns(new_rows):
     # Backfill missing data
     udf = backfill(udf)
     
-    # Train win probability model (from win_probability_predictor) when we have new tickers; predict for new rows and write to returns_tracker.csv
+    # Train win probability model (from win_probability_predictor) on historical data; predict for all rows and write to returns_tracker.csv
     new_set = set()
     if new_rows:
         for row in new_rows:
@@ -765,12 +765,14 @@ def update_returns(new_rows):
             if t and fq is not None and str(fq).strip():
                 new_set.add((str(t).strip(), str(fq).strip()))
     win_model, win_encoders = None, None
-    if new_set:
-        win_model, win_encoders = train_win_prob_model(existing_df)
+    # Always train when we have enough data with returns (not just when there are new tickers)
+    train_df = udf if not udf.empty else existing_df
+    if not train_df.empty and "3D Return" in train_df.columns:
+        win_model, win_encoders = train_win_prob_model(train_df)
         if win_model is not None:
-            print(f"  Win probability model trained; predicting for {len(new_set)} new ticker(s).")
+            print(f"  Win probability model trained; predicting for all tickers.")
         else:
-            print("  Win probability model not available (need enough history with 5D Return); new rows will have blank Win Probability.")
+            print("  Win probability model not available (need enough history with 3D Return); rows will have blank Win Probability.")
     
     # Calculate returns
     tickers = udf["Ticker"].dropna().unique().tolist()
@@ -803,8 +805,8 @@ def update_returns(new_rows):
             date_check = check_date_status(d, r.get("Earnings Date (yfinance)"), date_added=r.get("Date Added"), timing=timing)
             fq_val = r.get("Fiscal Quarter")
             fq_str = "" if (fq_val is None or pd.isna(fq_val)) else str(fq_val).strip()
-            is_new = (str(t).strip(), fq_str) in new_set
-            if is_new and win_model is not None:
+            # Predict win probability for all rows when model is available (updates based on win_probability_predictor)
+            if win_model is not None:
                 win_prob = get_win_probability_for_row(win_model, win_encoders, r)
             else:
                 win_prob = r.get("Win Probability") if pd.notna(r.get("Win Probability")) and r.get("Win Probability") != "" else np.nan

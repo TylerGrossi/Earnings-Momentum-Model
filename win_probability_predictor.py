@@ -406,19 +406,9 @@ def predict_win_probability(model, encoders, stock_data):
 # MAIN TRAINING FUNCTION
 # ------------------------------------
 
-@st.cache_data(ttl=3600)
-def train_win_probability_model(returns_df, model_type='random_forest'):
+def _train_win_probability_model_impl(returns_df, model_type='random_forest'):
     """
-    Train win probability model from returns_tracker data.
-    
-    Args:
-        returns_df: DataFrame with historical returns data
-        model_type: 'random_forest' or 'gradient_boosting'
-    
-    Returns:
-        model: Trained model
-        encoders: Dictionary of label encoders
-        metrics: Performance metrics
+    Core training logic (no cache). Used when running as library (e.g. Earnings Momentum Model).
     """
     if not SKLEARN_AVAILABLE:
         raise ImportError("scikit-learn not installed. Run: pip install scikit-learn")
@@ -436,6 +426,31 @@ def train_win_probability_model(returns_df, model_type='random_forest'):
     model, metrics = train_model(X, y, feature_names, model_type=model_type)
     
     return model, encoders, metrics
+
+
+def train_win_probability_model(returns_df, model_type='random_forest', use_cache=True):
+    """
+    Train win probability model from returns_tracker data.
+    
+    Args:
+        returns_df: DataFrame with historical returns data
+        model_type: 'random_forest' or 'gradient_boosting'
+        use_cache: If True, use Streamlit cache (for Streamlit apps). If False, always train fresh (for library/script use).
+    
+    Returns:
+        model: Trained model
+        encoders: Dictionary of label encoders
+        metrics: Performance metrics
+    """
+    if use_cache:
+        return _train_win_probability_model_cached(returns_df, model_type)
+    return _train_win_probability_model_impl(returns_df, model_type)
+
+
+@st.cache_data(ttl=3600)
+def _train_win_probability_model_cached(returns_df, model_type='random_forest'):
+    """Cached wrapper for Streamlit apps."""
+    return _train_win_probability_model_impl(returns_df, model_type)
 
 
 # ------------------------------------
