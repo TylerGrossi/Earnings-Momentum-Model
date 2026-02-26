@@ -66,14 +66,14 @@ def get_finviz_stats(ticker):
     """Get stock stats from Finviz."""
     try:
         soup = BeautifulSoup(requests.get(f"https://finviz.com/quote.ashx?t={ticker}", headers=HEADERS, timeout=10).text, "html.parser")
-        name, sector = get_company_name(ticker)
+        name, sector, industry = get_company_name(ticker)
         cells = soup.find_all("table")[8].find_all("td")
         data = {cells[i].get_text(strip=True): cells[i+1].get_text(strip=True) for i in range(0, len(cells), 2)}
-        return {"Ticker": ticker, "Company Name": name, "Sector": sector, "Price": data.get("Price"),
+        return {"Ticker": ticker, "Company Name": name, "Sector": sector, "industry": industry, "Price": data.get("Price"),
                 "EPS (TTM)": data.get("EPS (ttm)"), "P/E": data.get("P/E"), "Forward P/E": data.get("Forward P/E"),
                 "Market Cap": data.get("Market Cap"), "Beta": data.get("Beta")}
     except:
-        return {"Ticker": ticker, "Company Name": ticker, "Sector": "N/A"}
+        return {"Ticker": ticker, "Company Name": ticker, "Sector": "N/A", "industry": None}
 
 
 def has_buy_signal(ticker):
@@ -87,12 +87,39 @@ def has_buy_signal(ticker):
 
 
 def get_company_name(ticker):
-    """Get company name and sector from yfinance."""
+    """Get company name, sector, and industry from yfinance."""
     try:
         info = yf.Ticker(ticker).info
-        return info.get('longName') or info.get('shortName') or ticker, info.get('sector', 'N/A')
+        name = info.get('longName') or info.get('shortName') or ticker
+        sector = info.get('sector', 'N/A')
+        industry = info.get('industry')
+        return name, sector, industry
     except:
-        return ticker, 'N/A'
+        return ticker, 'N/A', None
+
+
+def get_yfinance_ticker_metrics(ticker, include_volatile=True):
+    """Get industry (always) and optionally short ratio, overallRisk, volume, insiders/institutions % held.
+    industry: can be backfilled for all rows.
+    Other metrics: only fetched when a new ticker enters (they change over time)."""
+    try:
+        info = yf.Ticker(ticker).info
+        result = {"industry": info.get("industry")}
+        if include_volatile:
+            result.update({
+                "short_ratio": info.get("shortRatio"),
+                "overallRisk": info.get("overallRisk"),
+                "volume": info.get("volume"),
+                "insidersPercentHeld": info.get("heldPercentInsiders"),
+                "institutionsPercentHeld": info.get("heldPercentInstitutions"),
+            })
+        return result
+    except Exception:
+        base = {"industry": None}
+        if include_volatile:
+            base.update({"short_ratio": None, "overallRisk": None, "volume": None,
+                        "insidersPercentHeld": None, "institutionsPercentHeld": None})
+        return base
 
 
 # ------------------------------------
@@ -510,9 +537,10 @@ def backfill(df):
         df["Earnings Date (yfinance)"] = pd.NaT
     df["Earnings Date (yfinance)"] = normalize_tz(df["Earnings Date (yfinance)"])
     
-    for col in ["EPS Estimate", "Reported EPS", "EPS Surprise (%)", "Fiscal Quarter", "Earnings Timing", "Date Added", "Date Check"]:
+    for col in ["EPS Estimate", "Reported EPS", "EPS Surprise (%)", "Fiscal Quarter", "Earnings Timing", "Date Added", "Date Check",
+                "industry", "short_ratio", "overallRisk", "volume", "insidersPercentHeld", "institutionsPercentHeld"]:
         if col not in df.columns: 
-            df[col] = np.nan if col in ["EPS Estimate", "Reported EPS", "EPS Surprise (%)"] else ""
+            df[col] = np.nan if col in ["EPS Estimate", "Reported EPS", "EPS Surprise (%)", "short_ratio", "overallRisk", "volume", "insidersPercentHeld", "institutionsPercentHeld"] else ""
     
     def needs_bf(row):
         fq = row.get("Fiscal Quarter")
@@ -528,7 +556,10 @@ def backfill(df):
         
         date_check_needs_update = (pd.isna(row.get("Date Check")) or row.get("Date Check") == "") and pd.notna(row.get("Earnings Date (yfinance)"))
         
-        return fq_needs_update or eps_needs_update or yf_date_needs_update or date_check_needs_update
+        # industry can be backfilled (volatile metrics are NOT backfilled)
+        industry_needs_update = pd.isna(row.get("industry")) or row.get("industry") == "" or str(row.get("industry", "")).strip() == ""
+        
+        return fq_needs_update or eps_needs_update or yf_date_needs_update or date_check_needs_update or industry_needs_update
     
     need = df[df.apply(needs_bf, axis=1)]
     if need.empty:
@@ -543,6 +574,13 @@ def backfill(df):
         fq = row.get("Fiscal Quarter")
         
         try:
+                # Backfill industry (volatile metrics are NOT backfilled - only when new ticker enters)
+                if pd.isna(row.get("industry")) or row.get("industry") == "" or str(row.get("industry", "")).strip() == "":
+                    metrics = get_yfinance_ticker_metrics(t, include_volatile=False)
+                    if metrics.get("industry"):
+                        df.at[idx, "industry"] = metrics["industry"]
+                        print(f"  {t} → industry: {metrics['industry']}")
+                
                 if pd.notna(ed):
                     if pd.isna(fq) or fq == "" or not (isinstance(fq, str) and "Q" in fq and "FY" in fq):
                         new_fq = get_fiscal_quarter(t, ed)
@@ -650,9 +688,18 @@ def build_universe():
         is_new = (t, row_fq) not in existing_keys
         if is_new:
             row["Date Added"] = datetime.now(MARKET_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            # Fetch volatile metrics only when new ticker enters (industry already from get_finviz_stats)
+            metrics = get_yfinance_ticker_metrics(t, include_volatile=True)
+            row.update({k: metrics[k] for k in ["short_ratio", "overallRisk", "volume", "insidersPercentHeld", "institutionsPercentHeld"]})
+            if metrics.get("industry") and (pd.isna(row.get("industry")) or row.get("industry") == ""):
+                row["industry"] = metrics["industry"]
             print(f"    ✅ NEW: {row.get('Company Name')} | {e.get('Fiscal Quarter')} | Added: {row['Date Added']}")
         else:
             row["Date Added"] = None  # preserved from existing in update_returns
+            # Volatile metrics NOT fetched for existing - preserve from existing in update_returns
+            for k in ["short_ratio", "overallRisk", "volume", "insidersPercentHeld", "institutionsPercentHeld"]:
+                if k not in row:
+                    row[k] = None
             print(f"    ✅ {row.get('Company Name')} | {e.get('Fiscal Quarter')}")
         
         rows.append(row)
@@ -728,18 +775,26 @@ def update_returns(new_rows):
         if "Earnings Date (yfinance)" in new_df.columns:
             new_df["Earnings Date (yfinance)"] = normalize_tz(new_df["Earnings Date (yfinance)"])
         
-        for c in ["Price", "EPS (TTM)", "P/E", "Forward P/E", "Beta", "EPS Estimate", "Reported EPS", "EPS Surprise (%)"]:
+        for c in ["Price", "EPS (TTM)", "P/E", "Forward P/E", "Beta", "EPS Estimate", "Reported EPS", "EPS Surprise (%)",
+                  "short_ratio", "overallRisk", "volume", "insidersPercentHeld", "institutionsPercentHeld"]:
             if c in new_df.columns: new_df[c] = new_df[c].apply(to_num)
         if "Market Cap" in new_df.columns:
             new_df["Market Cap"] = new_df["Market Cap"].apply(parse_mcap)
         
-        # Preserve Date Added from existing
+        # Preserve Date Added, industry, and volatile metrics from existing (volatile only when new ticker enters)
         if not existing_df.empty:
+            preserve_cols = ["industry", "short_ratio", "overallRisk", "volume", "insidersPercentHeld", "institutionsPercentHeld"]
             for idx, row in new_df.iterrows():
                 ticker, fq = row["Ticker"], row.get("Fiscal Quarter")
                 match = existing_df[(existing_df["Ticker"] == ticker) & (existing_df["Fiscal Quarter"] == fq)]
-                if not match.empty and pd.notna(match.iloc[0].get("Date Added")) and match.iloc[0].get("Date Added") != "":
-                    new_df.at[idx, "Date Added"] = match.iloc[0]["Date Added"]
+                if not match.empty:
+                    m = match.iloc[0]
+                    if pd.notna(m.get("Date Added")) and m.get("Date Added") != "":
+                        new_df.at[idx, "Date Added"] = m["Date Added"]
+                    # Preserve industry (backfillable) and volatile metrics from existing when new row is missing them
+                    for c in preserve_cols:
+                        if c in existing_df.columns and pd.notna(m.get(c)) and (pd.isna(row.get(c)) or row.get(c) == "" or (isinstance(row.get(c), str) and str(row.get(c)).strip() == "")):
+                            new_df.at[idx, c] = m[c]
         
         # Combine
         if not existing_df.empty:
@@ -835,7 +890,10 @@ def update_returns(new_rows):
                 "1W Range": round(rng, 3) if pd.notna(rng) else np.nan, 
                 "1W High Price": round(hip, 2) if pd.notna(hip) else np.nan, 
                 "1W Low Price": round(lop, 2) if pd.notna(lop) else np.nan,
-                "Company Name": r.get("Company Name", t), "Sector": r.get("Sector", "N/A")
+                "Company Name": r.get("Company Name", t), "Sector": r.get("Sector", "N/A"),
+                "industry": r.get("industry"), "short_ratio": r.get("short_ratio"),
+                "overallRisk": r.get("overallRisk"), "volume": r.get("volume"),
+                "insidersPercentHeld": r.get("insidersPercentHeld"), "institutionsPercentHeld": r.get("institutionsPercentHeld")
             })
         except: continue
 
