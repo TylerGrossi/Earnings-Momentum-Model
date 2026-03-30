@@ -53,10 +53,15 @@ def get_all_tickers():
     while True:
         url = f"{FINVIZ_SCREENER}&r={offset + 1}"
         soup = BeautifulSoup(requests.get(url, headers=HEADERS).text, "html.parser")
-        new = [cols[1].text.strip() for row in soup.select("table tr") 
-               for cols in [row.find_all("td")] if len(cols) > 1 
-               and cols[1].text.strip().isupper() and cols[1].text.strip().isalpha()]
-        if not new: break
+        seen = set()
+        new = []
+        for a in soup.find_all("a", href=lambda h: h and "quote.ashx?t=" in h):
+            t = a.text.strip()
+            if t and t.isupper() and t.isalpha() and len(t) <= 5 and t not in seen:
+                new.append(t)
+                seen.add(t)
+        if not new:
+            break
         tickers.extend(t for t in new if t not in tickers)
         offset += 20
     return tickers

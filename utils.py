@@ -72,12 +72,13 @@ def get_all_tickers():
         response = requests.get(url, headers=HEADERS)
         soup = BeautifulSoup(response.text, "html.parser")
         new_tickers = []
-        for row in soup.select("table tr"):
-            columns = row.find_all("td")
-            if len(columns) > 1:
-                ticker = columns[1].text.strip()
-                if ticker.isupper() and ticker.isalpha() and len(ticker) <= 5:
-                    new_tickers.append(ticker)
+        seen = set()
+        for a in soup.find_all("a", href=lambda h: h and "quote.ashx?t=" in h):
+            ticker = a.text.strip()
+            if (ticker and ticker.isupper() and ticker.isalpha()
+                    and len(ticker) <= 5 and ticker not in seen):
+                new_tickers.append(ticker)
+                seen.add(ticker)
         if not new_tickers:
             break
         tickers.extend(t for t in new_tickers if t not in tickers)

@@ -48,6 +48,23 @@ try:
 except ImportError:
     WIN_PROB_AVAILABLE = False
 
+# Same filtering and stop-loss backtest as Earnings Analysis / Stop Loss tabs
+try:
+    from data_loader import apply_consistent_filtering
+except ImportError:
+    apply_consistent_filtering = None
+
+try:
+    from stop_loss_analysis import run_comparative_analysis
+except ImportError:
+    run_comparative_analysis = None
+
+from utils import (
+    compute_portfolio_return_for_return_series,
+    _buy_date_from_earnings,
+    CAPITAL_PER_TRADE,
+)
+
 # Try to import dotenv for .env file support
 try:
     from dotenv import load_dotenv
@@ -217,18 +234,22 @@ def load_hourly_prices():
 
 
 def filter_data(returns_df):
-    """Apply standard filtering: remove DATE PASSED and require 3D Return."""
+    """
+    Match earnings_analysis / stop_loss / data_loader: exclude tickers with any DATE PASSED row,
+    require valid 3D Return, Forward P/E <= 15 (or N/A per utils.filter_returns_by_forward_pe).
+    """
     if returns_df is None or returns_df.empty:
         return pd.DataFrame()
-    
+    if apply_consistent_filtering is not None:
+        filtered_returns, _, _ = apply_consistent_filtering(returns_df.copy(), None)
+        if filtered_returns is None or filtered_returns.empty:
+            return pd.DataFrame()
+        return filtered_returns
     df = returns_df.copy()
-    
     if 'Date Check' in df.columns:
         df = df[df['Date Check'] != 'DATE PASSED']
-    
     if '3D Return' in df.columns:
         df = df[df['3D Return'].notna()].copy()
-    
     return df
 
 
@@ -237,27 +258,30 @@ def filter_data(returns_df):
 # ------------------------------------
 
 def get_strategy_rules() -> str:
-    """Return the strategy rules."""
+    """Return the strategy rules (aligned with stock_screener and quant dashboard)."""
     rules = """
 ## Earnings Momentum Strategy Rules
 
 ### Entry Criteria (ALL must be met):
-1. **Earnings This Week** - Stock has earnings scheduled for current week
-2. **SMA20 > SMA50** - Golden cross (20-day SMA above 50-day SMA)  
-3. **Barchart Buy Signal** - Stock shows "Buy" opinion on Barchart.com
+1. **Earnings This Week** - Stock has earnings scheduled for the current week
+2. **SMA20 > SMA50** - 20-day SMA above 50-day SMA
+3. **Barchart Buy Signal** - Barchart opinion shows "Buy"
+4. **Low Forward P/E** - Forward P/E at most 15 when a numeric Forward P/E is present (matches tracker / screener)
 
 ### Entry Timing:
-- **BMO (Before Market Open)**: Buy at previous day's close (~4pm day before)
-- **AMC (After Market Close)**: Buy at earnings day close (~4pm on earnings day)
+- **BMO (Before Market Open)**: Track from the previous session's close (before the earnings morning)
+- **AMC (After Market Close)**: Track from the close on the earnings date
 
-### Exit Rules:
-1. **Stop Loss: -10%** - Exit if position drops 10% from entry
-   - If stock gaps down below -10%, take the actual gap loss
-2. **Time Exit: Day 5** - Exit at market close on trading day 5
-3. **No Profit Cap** - Let winners run
+### Measured Holding Period (Dashboard):
+- **3 trading days (3D Return)** is the primary post-earnings return metric in Earnings Analysis and Stop Loss optimization.
+
+### Stop Loss (Backtest / Optimization Tab):
+- Stop levels from **-1% through -20%** on a fixed grid (every 1% up to -10%, then -12, -14, -16, -18, -20).
+- Intraday path uses **hourly** data through day 3; if price hits the stop, exit at the stop unless the first observation is a **gap down** through the stop (then the actual gap return is used).
+- The app recommends a stop only if it **beats the normal 3D hold** on **portfolio return** (same capital / overlap logic as Power BI); otherwise it recommends **no stop loss**.
 
 ### Position Sizing:
-- Equal weight per trade
+- Equal capital per trade in the portfolio return model; analysis tabs use the filtered tracker universe (valid 3D, Forward P/E rule, DATE PASSED tickers excluded).
 """
     return rules
 
@@ -613,6 +637,9 @@ def get_stock_details(ticker: str) -> str:
     result += f"- Sector: {row.get('Sector', 'N/A')}\n"
     result += f"- Market Cap: {row.get('Market Cap', 'N/A')}\n"
     result += f"- Beta: {row.get('Beta', 'N/A')}\n"
+    fwd_pe = row.get('Forward P/E')
+    if pd.notna(fwd_pe) and fwd_pe != '' and str(fwd_pe).strip().upper() != 'N/A':
+        result += f"- Forward P/E: {fwd_pe}\n"
     result += f"- P/E Ratio: {row.get('P/E', 'N/A')}\n\n"
     
     result += "### Historical Earnings Trade\n"
@@ -657,60 +684,70 @@ def get_stock_details(ticker: str) -> str:
 
 
 def get_strategy_performance() -> str:
-    """Get overall strategy performance."""
+    """
+    Strategy performance echoing the Power BI dashboard cards:
+    Max Concurrent, # Trades, Win%, Avg 3D Return, Portfolio Return,
+    Annualized Return — all using the correct 3D sell-date math.
+    """
     df = filter_data(load_returns_data())
     if df.empty:
         return "Could not load data from GitHub."
-    
+
+    m = _compute_dashboard_metrics(df)
+
     total_trades = len(df)
-    returns_3d = df['3D Return'].dropna() * 100
-    
+    returns_3d = df["3D Return"].dropna()
     wins = (returns_3d > 0).sum()
-    win_rate = wins / total_trades * 100 if total_trades > 0 else 0
-    
+    win_pct = wins / len(returns_3d) * 100 if len(returns_3d) > 0 else 0
+    avg_3d = returns_3d.mean() * 100
+
     result = "## Strategy Performance Summary\n\n"
-    result += f"**Total Completed Trades:** {total_trades}\n\n"
-    
-    result += "### 5-Day Return Statistics\n"
-    result += f"- **Total Return:** {returns_3d.sum():+.1f}%\n"
-    result += f"- **Average Return:** {returns_3d.mean():+.2f}%\n"
-    result += f"- **Median Return:** {returns_3d.median():+.2f}%\n"
-    result += f"- **Std Deviation:** {returns_3d.std():.2f}%\n"
-    result += f"- **Best Trade:** {returns_3d.max():+.1f}%\n"
-    result += f"- **Worst Trade:** {returns_3d.min():+.1f}%\n\n"
-    
-    result += f"### Win Rate\n"
-    result += f"- **Wins:** {wins} ({win_rate:.1f}%)\n"
-    result += f"- **Losses:** {total_trades - wins} ({100-win_rate:.1f}%)\n\n"
-    
-    # EPS analysis
-    if 'EPS Surprise (%)' in df.columns:
-        eps_data = df['EPS Surprise (%)'].dropna()
+
+    result += "### Key Metrics\n\n"
+    result += "| Metric | Value |\n"
+    result += "|--------|-------|\n"
+    if m:
+        result += f"| Max Concurrent Trades | {m['max_concurrent']} |\n"
+    result += f"| Number of Trades | {total_trades} |\n"
+    result += f"| Win % | {win_pct:.2f}% |\n"
+    result += f"| Average 3D Return | {avg_3d:.2f}% |\n"
+    if m:
+        result += f"| Portfolio Return | {m['portfolio_return']*100:.2f}% |\n"
+        result += f"| Annualized Return | {m['annualized_return']*100:.2f}% |\n"
+
+    result += "\n### Per-Trade Stats\n"
+    pct = returns_3d * 100
+    result += f"- Median 3D Return: {pct.median():+.2f}%\n"
+    result += f"- Best Trade: {pct.max():+.1f}%\n"
+    result += f"- Worst Trade: {pct.min():+.1f}%\n"
+    result += f"- Std Deviation: {pct.std():.2f}%\n\n"
+
+    if "EPS Surprise (%)" in df.columns:
+        eps_data = df["EPS Surprise (%)"].dropna()
         if len(eps_data) > 0:
             beat_rate = (eps_data > 0).mean() * 100
-            result += f"### Earnings Surprise\n"
-            result += f"- **Trades with EPS Data:** {len(eps_data)}\n"
-            result += f"- **Beat Rate:** {beat_rate:.1f}%\n"
-            result += f"- **Median Surprise:** {eps_data.median():+.1f}%\n\n"
-    
-    # Sector breakdown
-    if 'Sector' in df.columns:
+            result += "### Earnings Surprise\n"
+            result += f"- Trades with EPS Data: {len(eps_data)}\n"
+            result += f"- Beat Rate: {beat_rate:.1f}%\n"
+            result += f"- Median Surprise: {eps_data.median():+.1f}%\n\n"
+
+    if "Sector" in df.columns:
         result += "### Top Sectors by Avg Return\n"
-        sector_stats = df.groupby('Sector').agg({
-            '3D Return': ['count', 'mean']
-        }).round(4)
-        sector_stats.columns = ['Count', 'Avg Return']
-        sector_stats['Avg Return'] = sector_stats['Avg Return'] * 100
-        sector_stats = sector_stats.sort_values('Avg Return', ascending=False).head(5)
-        
+        sector_stats = (
+            df.groupby("Sector")["3D Return"]
+            .agg(["count", "mean"])
+            .rename(columns={"count": "Count", "mean": "Avg Return"})
+        )
+        sector_stats["Avg Return"] = sector_stats["Avg Return"] * 100
+        sector_stats = sector_stats.sort_values("Avg Return", ascending=False).head(5)
         for sector, row in sector_stats.iterrows():
-            result += f"- **{sector}:** {row['Avg Return']:+.2f}% avg ({int(row['Count'])} trades)\n"
-    
+            result += f"- {sector}: {row['Avg Return']:+.2f}% avg ({int(row['Count'])} trades)\n"
+
     return result
 
 
 def run_backtest(stop_loss_pct: float = -10, holding_days: int = 3) -> str:
-    """Run a backtest with custom parameters."""
+    """Backtest one stop level vs normal 3D hold; horizon capped at 3 days to match Stop Loss tab."""
     returns_df = filter_data(load_returns_data())
     hourly_df = load_hourly_prices()
     
@@ -719,6 +756,7 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 3) -> str:
     
     stop_loss_pct = max(-50, min(-1, stop_loss_pct))
     holding_days = max(1, min(10, holding_days))
+    holding_days = min(holding_days, 3)  # Align primary horizon with stop_loss_analysis / hourly grid
     stop_loss = stop_loss_pct / 100.0
     
     hourly_df = hourly_df.copy()
@@ -820,90 +858,116 @@ def run_backtest(stop_loss_pct: float = -10, holding_days: int = 3) -> str:
 
 
 def compare_stop_losses() -> str:
-    """Compare different stop loss levels."""
+    """Match Stop Loss tab: SL grid, 3-day path, matrix on avg return; best pick by portfolio return."""
     returns_df = filter_data(load_returns_data())
     hourly_df = load_hourly_prices()
-    
+
     if returns_df.empty or hourly_df.empty:
         return "Could not load data for comparison."
-    
+
+    if run_comparative_analysis is None:
+        return "Stop loss backtest helper is unavailable (stop_loss_analysis import failed)."
+
+    master_results = run_comparative_analysis(hourly_df, returns_df, max_days=3)
+    if master_results.empty:
+        return (
+            "No valid trades for stop-loss comparison. Need hourly_prices coverage and "
+            "earnings dates at least 7 days in the past."
+        )
+
+    rd = returns_df.copy()
+    rd["Earnings Date"] = pd.to_datetime(rd["Earnings Date"], errors="coerce")
+    rd["_ed"] = rd["Earnings Date"].dt.date
+    trades_meta = master_results[["Ticker", "Date"]].copy()
+    trades_meta = trades_meta.merge(
+        rd[["Ticker", "_ed", "Earnings Timing"]].drop_duplicates(subset=["Ticker", "_ed"]),
+        left_on=["Ticker", "Date"],
+        right_on=["Ticker", "_ed"],
+        how="left",
+    )
+    trades_meta["Earnings Date"] = pd.to_datetime(trades_meta["Date"])
+
+    base_col = "Normal Model (3D)"
+    sl_cols = [c for c in master_results.columns if c.startswith("SL ")]
+
+    port_ret_normal, _ = compute_portfolio_return_for_return_series(
+        trades_meta,
+        master_results[base_col],
+        earnings_date_col="Earnings Date",
+        timing_col="Earnings Timing",
+    )
+    port_ret_normal = port_ret_normal if port_ret_normal is not None else 0.0
+
+    portfolio_returns = {}
+    for col in sl_cols:
+        pr, _ = compute_portfolio_return_for_return_series(
+            trades_meta,
+            master_results[col],
+            earnings_date_col="Earnings Date",
+            timing_col="Earnings Timing",
+        )
+        portfolio_returns[col] = pr if pr is not None else 0.0
+
+    if not portfolio_returns:
+        return (
+            "## Stop Loss Level Comparison\n\n"
+            "Backtest ran but produced no stop-loss columns.\n"
+        )
+
+    best_sl_col = max(portfolio_returns, key=portfolio_returns.get)
+    best_port = portfolio_returns[best_sl_col]
+    use_stop_loss = bool(best_sl_col and best_port > port_ret_normal)
+
+    rd_3d = returns_df["3D Return"].dropna()
+    avg_normal_3d = (
+        (rd_3d.mean() * 100) if len(rd_3d) > 0 else float(master_results[base_col].mean() * 100)
+    )
+
     result = "## Stop Loss Level Comparison\n\n"
-    result += "Testing stop loss levels from -2% to -20%:\n\n"
-    result += "| Stop Loss | Total Return | Alpha | Win Rate |\n"
-    result += "|-----------|--------------|-------|----------|\n"
-    
-    best_sl = None
-    best_return = -999
-    
-    hourly_df_copy = hourly_df.copy()
-    hourly_df_copy['Earnings Date'] = pd.to_datetime(hourly_df_copy['Earnings Date']).dt.date
-    returns_df_copy = returns_df.copy()
-    returns_df_copy['Earnings Date'] = pd.to_datetime(returns_df_copy['Earnings Date']).dt.date
-    
-    today = datetime.now().date()
-    
-    valid_trades = returns_df_copy[
-        (returns_df_copy['3D Return'].notna()) & 
-        (returns_df_copy['Earnings Date'] <= (today - timedelta(days=7)))
-    ]
-    
-    normal_total = valid_trades['3D Return'].sum() * 100
-    
-    for sl_pct in range(-2, -22, -2):
-        sl = sl_pct / 100.0
-        strategy_returns = []
-        
-        for _, trade in valid_trades.iterrows():
-            ticker = trade['Ticker']
-            e_date = trade['Earnings Date']
-            
-            trade_data = hourly_df_copy[
-                (hourly_df_copy['Ticker'] == ticker) & 
-                (hourly_df_copy['Earnings Date'] == e_date) &
-                (hourly_df_copy['Trading Day'] >= 1)
-            ].sort_values('Datetime')
-            
-            if trade_data.empty:
-                continue
-            
-            exit_day = min(5, trade_data['Trading Day'].max())
-            exit_day_data = trade_data[trade_data['Trading Day'] == exit_day]
-            if exit_day_data.empty:
-                continue
-            
-            close_return = exit_day_data['Return From Earnings (%)'].iloc[-1] / 100
-            final_return = close_return
-            first_candle = True
-            
-            for _, hour in trade_data.iterrows():
-                if int(hour['Trading Day']) > exit_day:
-                    break
-                h_ret = hour['Return From Earnings (%)'] / 100
-                if h_ret <= sl:
-                    final_return = h_ret if (first_candle and h_ret < sl) else sl
-                    break
-                first_candle = False
-            
-            strategy_returns.append(final_return)
-        
-        if strategy_returns:
-            total_ret = sum(strategy_returns) * 100
-            alpha = total_ret - normal_total
-            win_rate = sum(1 for r in strategy_returns if r > 0) / len(strategy_returns) * 100
-            
-            result += f"| {sl_pct}% | {total_ret:+.1f}% | {alpha:+.1f}% | {win_rate:.1f}% |\n"
-            
-            if total_ret > best_return:
-                best_return = total_ret
-                best_sl = sl_pct
-    
-    result += f"\n**Recommendation:** The **{best_sl}%** stop loss provides the highest total return ({best_return:+.1f}%).\n"
-    
+    result += (
+        "Aligned with the **Stop Loss Optimization** tab: **3 trading days**, hourly stops, gap-down rule, "
+        "SL levels -1%…-10% then -12/-14/-16/-18/-20%. "
+        f"Backtest: **{len(master_results)}** trades with hourly data; filtered universe **{len(returns_df)}** rows.\n\n"
+    )
+
+    result += "### Matrix (matches Performance Comparison Matrix)\n\n"
+    result += "| Strategy | Avg Return (%) | Alpha vs Normal 3D Avg (%) | Win Rate (%) |\n"
+    result += "|----------|----------------|-----------------------------|-------------|\n"
+
+    sl_cols_sorted = sorted(
+        sl_cols, key=lambda c: int(c.replace("SL ", "").replace("%", "")), reverse=True
+    )
+    for col in sl_cols_sorted:
+        avg_ret = master_results[col].mean() * 100
+        alpha_avg = avg_ret - avg_normal_3d
+        wr = (master_results[col] > 0).mean() * 100
+        result += f"| {col} | {avg_ret:+.2f}% | {alpha_avg:+.2f}% | {wr:.1f}% |\n"
+
+    sub_normal_mean = master_results[base_col].mean() * 100
+    result += (
+        f"\n_Benchmark **Normal 3D Average** (full filtered universe, {len(returns_df)} trades): "
+        f"{avg_normal_3d:+.2f}%. "
+        f"Backtest subsample mean for normal 3D ({len(master_results)} trades): {sub_normal_mean:+.2f}%._\n"
+    )
+
+    result += "\n### Portfolio-based recommendation (same as tab)\n\n"
+    pn, pb = port_ret_normal * 100, best_port * 100
+    if use_stop_loss and best_sl_col:
+        result += (
+            f"**{best_sl_col}** maximizes portfolio return (**{pb:.2f}%** vs normal **{pn:.2f}%** "
+            "under the model’s capital / overlap rules).\n"
+        )
+    else:
+        result += (
+            f"**No stop loss** — no tested stop beat the normal 3D hold on portfolio return "
+            f"(normal **{pn:.2f}%**; best stop portfolio **{pb:.2f}%**).\n"
+        )
+
     return result
 
 
 def get_beat_miss_analysis() -> str:
-    """Analyze beat vs miss performance."""
+    """Analyze beat vs miss performance (mean 3D return — same idea as Earnings Analysis tab)."""
     df = filter_data(load_returns_data())
     if df.empty:
         return "Could not load data."
@@ -918,6 +982,10 @@ def get_beat_miss_analysis() -> str:
     misses = df[df['EPS Surprise (%)'] < 0]
     
     result = "## Beat vs Miss Analysis\n\n"
+    result += (
+        "_Filtered universe matches the dashboard (3D Return, Forward P/E rule, DATE PASSED). "
+        "Beat = positive EPS surprise; metrics use **3D** returns._\n\n"
+    )
     result += f"**Total Trades with EPS Data:** {len(df)}\n\n"
     
     result += "### Earnings Beats\n"
@@ -965,10 +1033,18 @@ def list_all_tickers() -> str:
     return result
 
 
+def _pe_display_for_row(row) -> str:
+    """Prefer Forward P/E for display and modeling (matches win probability / screener)."""
+    fp = row.get("Forward P/E") if hasattr(row, "get") else None
+    if fp is not None and not (pd.isna(fp) or str(fp).strip() == "" or str(fp).strip().upper() == "N/A"):
+        return fp
+    return row.get("P/E", "N/A") if hasattr(row, "get") else "N/A"
+
+
 def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     """
     Find similar tickers based on financial metrics using KNN.
-    Compares stocks based on P/E ratio, Beta, Market Cap, and Sector.
+    Compares stocks based on Forward P/E (fallback P/E), Beta, Market Cap, and Sector.
     
     Args:
         ticker: Stock ticker to find similar stocks for
@@ -1028,7 +1104,14 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     
     # Create feature dataframe
     feature_df = df.copy()
-    feature_df['P/E Numeric'] = pd.to_numeric(feature_df['P/E'], errors='coerce')
+    if "Forward P/E" in feature_df.columns:
+        feature_df["P/E Numeric"] = pd.to_numeric(feature_df["Forward P/E"], errors="coerce")
+        if "P/E" in feature_df.columns:
+            feature_df["P/E Numeric"] = feature_df["P/E Numeric"].fillna(
+                pd.to_numeric(feature_df["P/E"], errors="coerce")
+            )
+    else:
+        feature_df["P/E Numeric"] = pd.to_numeric(feature_df["P/E"], errors="coerce")
     feature_df['Beta Numeric'] = pd.to_numeric(feature_df['Beta'], errors='coerce')
     feature_df['Market Cap Numeric'] = feature_df['Market Cap'].apply(parse_market_cap)
     
@@ -1112,13 +1195,13 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     result = f"## Similar Stocks to {ticker.upper()}\n\n"
     
     # Create table header
-    result += "| Rank | Ticker | Company | Similarity | P/E | Beta | Market Cap | Sector | 3D Return |\n"
-    result += "|------|--------|---------|------------|-----|------|------------|--------|-----------|\n"
+    result += "| Rank | Ticker | Company | Similarity | Fwd P/E | Beta | Market Cap | Sector | 3D Return |\n"
+    result += "|------|--------|---------|------------|---------|------|------------|--------|-----------|\n"
     
     # Add target ticker as first row (reference row)
     target_ticker_val = target_row.get('Ticker', 'N/A')
     target_company = target_row.get('Company Name', 'N/A')
-    target_pe = target_row.get('P/E', 'N/A')
+    target_pe = _pe_display_for_row(target_row)
     target_beta = target_row.get('Beta', 'N/A')
     target_mcap = target_row.get('Market Cap', 'N/A')
     target_sector = target_row.get('Sector', 'N/A')
@@ -1147,7 +1230,7 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
         
         ticker_val = similar_row['Ticker']
         company = similar_row.get('Company Name', 'N/A')
-        pe = similar_row.get('P/E', 'N/A')
+        pe = _pe_display_for_row(similar_row)
         beta = similar_row.get('Beta', 'N/A')
         mcap = similar_row.get('Market Cap', 'N/A')
         sector = similar_row.get('Sector', 'N/A')
@@ -1163,25 +1246,23 @@ def find_similar_tickers(ticker: str, n_neighbors: int = 10) -> str:
     result += "\n**Similarity Score Explanation:**\n"
     result += "- The similarity score measures how similar each stock is to the reference stock (100%) based on financial metrics.\n"
     result += "- Scores range from 0% to 100%, where 100% = identical to reference stock, and lower scores = less similar.\n"
-    result += "- Similarity is calculated using K-Nearest Neighbors algorithm comparing P/E ratio, Beta, Market Cap, and Sector.\n"
-    result += "- Returns shown are 5-day returns from earnings date.\n"
+    result += "- Similarity uses K-Nearest Neighbors on Forward P/E (or P/E if Forward is missing), Beta, Market Cap, and Sector.\n"
+    result += "- 3D Return is the three-day post-earnings return from the tracker.\n"
     
     return result
 
 
 def scan_live_signals() -> str:
     """
-    Run live scanner to find stocks currently signaling:
-    1. Scan Finviz for stocks with earnings this week + SMA20 > SMA50
-    2. Check Barchart for buy signals
-    3. Return list of stocks meeting all criteria
+    Live Finviz screen (earnings this week + SMA20 > SMA50) plus Barchart Buy.
+    Full strategy also requires Forward P/E ≤ 15 on the tracker; Finviz URL does not apply that filter.
     """
     result = "## Live Stock Scanner Results\n\n"
     result += f"Scan Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
     
     # Step 1: Get tickers from Finviz
     result += "### Step 1: Finviz Screener\n"
-    result += "Criteria: Earnings this week + SMA20 crossed above SMA50\n\n"
+    result += "Criteria: Earnings this week · SMA20 above SMA50 (add Barchart Buy + Forward P/E ≤ 15 in the full strategy)\n\n"
     
     try:
         base_url = "https://finviz.com/screener.ashx?v=111&f=earningsdate_thisweek,ta_sma20_cross50a"
@@ -1303,120 +1384,185 @@ def scan_live_signals() -> str:
     return result
 
 
+def _sell_date_3d(buy_date):
+    """
+    Compute Sell Date (3D) from Buy Date — matches Power BI exactly.
+    3 trading days: Mon/Tue buy -> +3 cal days, Wed/Thu/Fri -> +5 (crosses weekend).
+    """
+    from datetime import date as _date_type
+    if buy_date is None:
+        return None
+    d = buy_date if isinstance(buy_date, _date_type) else buy_date.date()
+    wk = d.weekday()  # Mon=0 .. Sun=6
+    if wk <= 1:       # Mon/Tue
+        days_add = 3
+    elif wk <= 4:     # Wed/Thu/Fri
+        days_add = 5
+    elif wk == 5:     # Sat (rare)
+        days_add = 4
+    else:             # Sun (rare)
+        days_add = 3
+    return d + timedelta(days=days_add)
+
+
+def _dax_weeknum_2(d):
+    """Replicate DAX WEEKNUM(date, 2) — week starts on Monday, week 1 contains Jan 1."""
+    jan1 = d.replace(month=1, day=1)
+    day_of_year_0 = (d - jan1).days
+    jan1_wd = jan1.weekday()  # Mon=0
+    return (day_of_year_0 + jan1_wd) // 7 + 1
+
+
+def _week_id_3d(sell_date):
+    """YEAR(sell) * 100 + WEEKNUM(sell, 2) — matches Power BI Week ID (3D)."""
+    if sell_date is None:
+        return None
+    return sell_date.year * 100 + _dax_weeknum_2(sell_date)
+
+
+def _compute_dashboard_metrics(df):
+    """
+    One-stop function that replicates every headline number on the Power BI
+    dashboard using the correct 3D sell date for all calculations.
+
+    Returns dict with portfolio stats AND risk metrics, or None.
+    """
+    if df is None or df.empty:
+        return None
+    if "3D Return" not in df.columns or "Earnings Date" not in df.columns:
+        return None
+
+    df = df.copy()
+    df["Earnings Date"] = pd.to_datetime(df["Earnings Date"], errors="coerce")
+    df["3D Return"] = pd.to_numeric(df["3D Return"], errors="coerce")
+    closed = df[df["3D Return"].notna()].copy()
+    if closed.empty:
+        return None
+
+    timing_col = "Earnings Timing" if "Earnings Timing" in closed.columns else None
+
+    closed["_buy_date"] = closed.apply(
+        lambda r: _buy_date_from_earnings(
+            r["Earnings Date"], r.get(timing_col) if timing_col else None
+        ),
+        axis=1,
+    )
+    closed = closed[closed["_buy_date"].notna()].copy()
+    closed["_sell_date_3d"] = closed["_buy_date"].apply(_sell_date_3d)
+    closed = closed[closed["_sell_date_3d"].notna()].copy()
+    if closed.empty:
+        return None
+
+    closed["_trade_profit"] = closed["3D Return"] * CAPITAL_PER_TRADE
+    closed["_week_id"] = closed["_sell_date_3d"].apply(_week_id_3d)
+
+    # ------------------------------------------------------------------
+    # Max Capital High Water Mark (3D)
+    # ------------------------------------------------------------------
+    global_start = closed["_buy_date"].min()
+    max_sell = closed["_sell_date_3d"].max()
+    max_concurrent = 0
+    day = global_start
+    while day <= max_sell:
+        count = (
+            (closed["_buy_date"] <= day) & (closed["_sell_date_3d"] >= day)
+        ).sum()
+        max_concurrent = max(max_concurrent, count)
+        day += timedelta(days=1)
+    if max_concurrent <= 0:
+        max_concurrent = 1
+    fund_size = max_concurrent * CAPITAL_PER_TRADE
+
+    # ------------------------------------------------------------------
+    # Portfolio Return & Annualized Return (3D)
+    # ------------------------------------------------------------------
+    total_net_profit = closed["_trade_profit"].sum()
+    portfolio_return = total_net_profit / fund_size  # decimal
+
+    start_date = closed["_buy_date"].min()
+    end_date = closed["_sell_date_3d"].max()
+    days_in_period = (end_date - start_date).days
+    if days_in_period > 0:
+        annualized_return = (1 + portfolio_return) ** (365 / days_in_period) - 1
+    else:
+        annualized_return = 0.0
+
+    # ------------------------------------------------------------------
+    # Weekly risk metrics — ALL grouped by Week ID (3D) per DAX
+    # ------------------------------------------------------------------
+    risk_free_rate = 0.04
+    weekly_rf = risk_free_rate / 52.0
+
+    weekly_profit = closed.groupby("_week_id")["_trade_profit"].sum()
+    weekly_returns = weekly_profit / fund_size  # DIVIDE(SUM(Trade Profit), FundSize)
+
+    n_weeks = len(weekly_returns)
+    has_risk = n_weeks >= 2
+
+    if has_risk:
+        avg_wr = weekly_returns.mean()           # AVERAGEX(WeeklyData, [WeeklyReturn])
+        sigma_p = weekly_returns.std(ddof=0)     # STDEVX.P
+
+        # Sharpe: (AvgWeeklyReturn - WeeklyRiskFree) / WeeklySigma * SQRT(52)
+        if sigma_p > 0:
+            sharpe = (avg_wr - weekly_rf) / sigma_p * np.sqrt(52)
+        else:
+            sharpe = 0.0
+
+        # Volatility: WeeklySigma * SQRT(52)
+        ann_vol = sigma_p * np.sqrt(52)
+
+        # VaR 95%: MeanReturn - 1.645 * WeeklySigma
+        z_score = 1.645
+        var_weekly = avg_wr - (z_score * sigma_p) if sigma_p > 0 else 0.0
+        ann_var = var_weekly * np.sqrt(52)
+    else:
+        avg_wr = sigma_p = sharpe = ann_vol = 0.0
+        var_weekly = ann_var = 0.0
+
+    return {
+        # portfolio cards
+        "max_concurrent": max_concurrent,
+        "n_trades": len(closed),
+        "portfolio_return": portfolio_return,
+        "annualized_return": annualized_return,
+        "days_in_period": days_in_period,
+        "fund_size": fund_size,
+        # risk panel
+        "has_risk": has_risk,
+        "n_weeks": n_weeks,
+        "sharpe": sharpe,
+        "weekly_volatility": sigma_p,
+        "ann_volatility": ann_vol,
+        "var_weekly": var_weekly,
+        "var_annualized": ann_var,
+        "avg_weekly_return": avg_wr,
+    }
+
+
 def get_risk_metrics() -> str:
-    """Calculate risk metrics for the strategy."""
+    """Weekly and Annualized Risk Metrics only: Sharpe, Volatility, VaR 95%."""
     df = filter_data(load_returns_data())
     if df.empty:
         return "Could not load data for risk analysis."
-    
-    returns_3d = df['3D Return'].dropna() * 100  # Convert to percentage
-    
-    result = "## Strategy Risk Metrics\n\n"
-    
-    # Basic Stats
-    total_trades = len(returns_3d)
-    result += f"Total Trades Analyzed: {total_trades}\n\n"
-    
-    # Drawdown Analysis
-    result += "### Drawdown Analysis\n"
-    worst_trade = returns_3d.min()
-    worst_idx = df['3D Return'].idxmin()
-    worst_ticker = df.loc[worst_idx, 'Ticker'] if pd.notna(worst_idx) else 'N/A'
-    best_trade = returns_3d.max()
-    best_idx = df['3D Return'].idxmax()
-    best_ticker = df.loc[best_idx, 'Ticker'] if pd.notna(best_idx) else 'N/A'
-    
-    result += f"- Worst Single Trade: {worst_trade:.2f}% ({worst_ticker})\n"
-    result += f"- Best Single Trade: {best_trade:.2f}% ({best_ticker})\n"
-    
-    # Count significant losses
-    losses_over_10 = (returns_3d < -10).sum()
-    losses_over_20 = (returns_3d < -20).sum()
-    losses_over_30 = (returns_3d < -30).sum()
-    
-    result += f"- Trades with > 10% loss: {losses_over_10} ({losses_over_10/total_trades*100:.1f}%)\n"
-    result += f"- Trades with > 20% loss: {losses_over_20} ({losses_over_20/total_trades*100:.1f}%)\n"
-    result += f"- Trades with > 30% loss: {losses_over_30} ({losses_over_30/total_trades*100:.1f}%)\n\n"
-    
-    # Volatility Metrics
-    result += "### Volatility Metrics\n"
-    std_dev = returns_3d.std()
-    result += f"- Standard Deviation: {std_dev:.2f}%\n"
-    result += f"- Return Range: {worst_trade:.2f}% to {best_trade:.2f}%\n"
-    
-    # Percentiles
-    p5 = returns_3d.quantile(0.05)
-    p25 = returns_3d.quantile(0.25)
-    p75 = returns_3d.quantile(0.75)
-    p95 = returns_3d.quantile(0.95)
-    
-    result += f"- 5th Percentile (worst 5%): {p5:.2f}%\n"
-    result += f"- 25th Percentile: {p25:.2f}%\n"
-    result += f"- 75th Percentile: {p75:.2f}%\n"
-    result += f"- 95th Percentile (best 5%): {p95:.2f}%\n\n"
-    
-    # Risk-Adjusted Returns
-    result += "### Risk-Adjusted Metrics\n"
-    avg_return = returns_3d.mean()
-    
-    # Sharpe-like ratio (simplified, assuming 0 risk-free rate)
-    sharpe_like = avg_return / std_dev if std_dev > 0 else 0
-    result += f"- Average Return: {avg_return:.2f}%\n"
-    result += f"- Return/Risk Ratio: {sharpe_like:.2f}\n"
-    
-    # Win/Loss Analysis
-    wins = returns_3d[returns_3d > 0]
-    losses = returns_3d[returns_3d < 0]
-    
-    avg_win = wins.mean() if len(wins) > 0 else 0
-    avg_loss = losses.mean() if len(losses) > 0 else 0
-    
-    result += f"- Average Win: {avg_win:.2f}%\n"
-    result += f"- Average Loss: {avg_loss:.2f}%\n"
-    
-    # Profit Factor
-    total_wins = wins.sum()
-    total_losses = abs(losses.sum())
-    profit_factor = total_wins / total_losses if total_losses > 0 else 0
-    result += f"- Profit Factor: {profit_factor:.2f} (total wins / total losses)\n\n"
-    
-    # Consecutive Analysis
-    result += "### Streak Analysis\n"
-    
-    # Calculate consecutive wins/losses
-    signs = (returns_3d > 0).astype(int)
-    max_consecutive_wins = 0
-    max_consecutive_losses = 0
-    current_wins = 0
-    current_losses = 0
-    
-    for val in signs:
-        if val == 1:
-            current_wins += 1
-            current_losses = 0
-            max_consecutive_wins = max(max_consecutive_wins, current_wins)
-        else:
-            current_losses += 1
-            current_wins = 0
-            max_consecutive_losses = max(max_consecutive_losses, current_losses)
-    
-    result += f"- Max Consecutive Wins: {max_consecutive_wins}\n"
-    result += f"- Max Consecutive Losses: {max_consecutive_losses}\n\n"
-    
-    # Worst 5 trades
-    result += "### Worst 5 Trades\n"
-    worst_5 = df.nsmallest(5, '3D Return')[['Ticker', 'Earnings Date', '3D Return', 'Sector']].copy()
-    worst_5['3D Return'] = worst_5['3D Return'] * 100
-    
-    for _, row in worst_5.iterrows():
-        ed = pd.to_datetime(row['Earnings Date']).strftime('%Y-%m-%d') if pd.notna(row['Earnings Date']) else 'N/A'
-        result += f"- {row['Ticker']}: {row['3D Return']:.2f}% ({ed}, {row.get('Sector', 'N/A')})\n"
-    
-    result += "\n### Risk Summary\n"
-    result += f"This strategy has a {(returns_3d > 0).mean()*100:.1f}% win rate with an average return of {avg_return:.2f}% per trade. "
-    result += f"However, {losses_over_10} trades ({losses_over_10/total_trades*100:.1f}%) resulted in losses greater than 10%. "
-    result += f"The worst single trade lost {worst_trade:.2f}%. Consider using stop losses to limit downside risk."
-    
+
+    m = _compute_dashboard_metrics(df)
+    if m is None or not m["has_risk"]:
+        return "Not enough weekly data for risk metrics (need 2+ weeks of trades)."
+
+    result = "## Risk Metrics (3D)\n\n"
+    result += "| Metric | Weekly | Annualized |\n"
+    result += "|--------|--------|------------|\n"
+    result += f"| Sharpe Ratio | — | {m['sharpe']:.2f} |\n"
+    result += (
+        f"| Volatility | {m['weekly_volatility']*100:.2f}% | "
+        f"{m['ann_volatility']*100:.2f}% |\n"
+    )
+    result += (
+        f"| VaR 95% | {m['var_weekly']*100:.2f}% | "
+        f"{m['var_annualized']*100:.2f}% |\n"
+    )
+
     return result
 
 
@@ -1655,79 +1801,59 @@ SYSTEM_PROMPT = """You are an AI assistant for the Earnings Momentum Strategy, a
 
 IMPORTANT DATA CONTEXT:
 - The tracker stores HISTORICAL trades that already happened
-- "Earnings Date" in the tracker is when the stock HAD earnings (past tense)
-- Returns (1D, 2D, 3D) are the actual returns AFTER that earnings date
-- You can also run a LIVE scanner to find stocks currently signaling
+- "Earnings Date" is when the stock had earnings (past tense)
+- The headline outcome in the app is **3D Return** (three trading days after the strategy entry). 1D/2D are also in the tracker when present
+- Full strategy entry: earnings this week, SMA20 > SMA50, Barchart Buy, and **Forward P/E ≤ 15** when a numeric Forward P/E exists (see get_strategy_rules)
+- **get_strategy_performance**, **get_risk_metrics**, **analyze_by_filter**, **get_beat_miss_analysis**, **compare_stop_losses**, and **run_backtest** use the SAME filtered universe as the Earnings Analysis and Stop Loss tabs: tickers with any DATE PASSED row removed, valid 3D Return, Forward P/E rule
+- **get_returns_this_week** / **get_earnings_this_week** use the raw tracker slice for the week (not re-filtered by Forward P/E) and may use yfinance (then Gemini) for live prices when configured
+- You can run **scan_live_signals** for a live Finviz + Barchart pass (Finviz does not encode the Forward P/E cap; mention that gap when relevant)
 
-You have access to the following tools:
+TOOLS:
 
-1. **get_strategy_rules** - Returns the entry/exit rules of the strategy
-2. **scan_live_signals** - LIVE SCANNER: Scans Finviz and Barchart RIGHT NOW to find stocks currently meeting entry criteria
-3. **get_earnings_this_week** - Lists stocks that HAD earnings this week from the tracker (historical)
-4. **get_stock_details(ticker)** - Gets full details for a specific stock's HISTORICAL trade
-5. **get_returns_this_week** - Returns for tickers that have ALREADY REPORTED earnings this week only (same "Reported" logic as stock_screener). Returns a markdown response that INCLUDES a Returns Summary TABLE with columns: Ticker, Reporting Time, Tracking Start (Price), Current/Latest Price, Return (%). Always present that table in your response when you call this tool. Uses tracker data only (no yfinance).
-6. **get_strategy_performance** - Returns overall historical performance metrics
-7. **get_risk_metrics** - Returns detailed risk analysis: drawdowns, volatility, worst trades, profit factor, streaks
-8. **analyze_by_filter(filter_type, filter_value)** - Analyze performance filtered by: market_cap, sector, beta, timing
-9. **run_backtest(stop_loss_pct, holding_days)** - Runs a backtest with custom parameters
-10. **compare_stop_losses** - Compares stop loss levels from -2% to -20%
-11. **get_beat_miss_analysis** - Analyzes historical performance by earnings beat vs miss
-11. **list_all_tickers** - Lists all tickers in the database
-12. **find_similar_tickers(ticker, n_neighbors)** - Find similar stocks based on financial metrics (P/E, Beta, Market Cap, Sector) using KNN. Returns a MARKDOWN TABLE with columns: Rank, Ticker, Company, Similarity, P/E, Beta, Market Cap, Sector, 3D Return. When user asks for "table of returns", present this table as-is. Example: find_similar_tickers(AAPL, 5)
+1. **get_strategy_rules** - Entry rules, 3D focus, stop-loss grid, portfolio-based stop recommendation (matches app copy)
+2. **scan_live_signals** - Live Finviz earnings+SMA screen, then Barchart Buy filter
+3. **get_earnings_this_week** - Tracker rows with earnings this calendar week
+4. **get_stock_details(ticker)** - Latest tracker row for a ticker (includes Forward P/E when present)
+5. **get_returns_this_week** - Reported-this-week only; includes Returns Summary table (Ticker, Reporting Time, Tracking Start, Current/Latest Price, Return %, Win Probability). Preserve the table in your reply
+6. **get_strategy_performance** - Win rate, 3D return stats, EPS surprise summary, sectors (filtered universe)
+7. **get_risk_metrics** - Weekly and Annualized Risk Metrics ONLY: Sharpe Ratio, Volatility, VaR 95% (matching Power BI). Does NOT include performance stats — use get_strategy_performance for those
+8. **analyze_by_filter(filter_type, filter_value)** - market_cap, sector, beta, timing (BMO/AMC); uses filtered universe
+9. **run_backtest(stop_loss_pct, holding_days)** - One stop level vs normal 3D hold; horizon is capped at **3 days** to match hourly backtest. Default second argument **3** if omitted
+10. **compare_stop_losses** - Same as Stop Loss tab: SL grid (-1..-10, then -12..-20), 3-day path, matrix of avg return / alpha vs full-universe normal 3D average, **portfolio-based** best stop or "no stop loss"
+11. **get_beat_miss_analysis** - Beat vs miss on **3D** returns (aligned with Earnings Analysis)
+12. **list_all_tickers** - Unique tickers in raw tracker load
+13. **find_similar_tickers(ticker, n_neighbors)** - KNN on Forward P/E (fallback P/E), Beta, Market Cap, Sector; table includes **Fwd P/E** and **3D Return**. Example: find_similar_tickers(AAPL, 5)
 
 When a user asks a question:
-1. Determine which tool(s) would help answer their question
-2. Call the appropriate tool by responding with: TOOL_CALL: tool_name(arguments)
-3. I will execute the tool and give you the results
-4. Then provide a helpful, conversational response based on the data
+1. Pick tool(s) that match the new methodology (3D, Forward P/E universe, portfolio stop logic)
+2. Respond with: TOOL_CALL: tool_name(arguments)
+3. Use tool results in a clear, conversational answer
 
-IMPORTANT TOOL SELECTION:
-- "What stocks are signaling?" or "What should I buy?" -> Use scan_live_signals()
-- "What are the risks?" or "Risk factors" -> Use get_risk_metrics()
-- Questions about market cap, sector, beta, or timing filters -> Use analyze_by_filter()
-- "Tell me about [ticker]" -> Use get_stock_details(ticker)
-- "Returns on tickers that reported earnings this week" or "returns this week" or "returns for tickers that have reported this week" -> Use get_returns_this_week()
-- "Find similar stocks to [ticker]" or "What stocks are similar to [ticker]?" -> Use find_similar_tickers(ticker)
+TOOL SELECTION:
+- Optimal stop / compare stops / which SL -> compare_stop_losses()
+- Single SL what-if -> run_backtest(-10, 3) style (stop % negative, days usually 3)
+- Beat vs miss / EPS surprise vs returns -> get_beat_miss_analysis()
+- Dashboard-style performance / win rate -> get_strategy_performance()
+- Sharpe / volatility / VaR -> get_risk_metrics()
+- Rules recap -> get_strategy_rules()
+- Similar names / peers -> find_similar_tickers()
 
 Examples:
-- "What stocks are signaling this week?" -> TOOL_CALL: scan_live_signals()
-- "What are the risk factors?" -> TOOL_CALL: get_risk_metrics()
-- "Returns for stocks with market cap above 100 billion" -> TOOL_CALL: analyze_by_filter(market_cap, above 100B)
-- "How do large cap stocks perform?" -> TOOL_CALL: analyze_by_filter(market_cap, above 50B)
-- "Performance for technology sector" -> TOOL_CALL: analyze_by_filter(sector, Technology)
-- "How do high beta stocks perform?" -> TOOL_CALL: analyze_by_filter(beta, above 1.5)
-- "BMO vs AMC performance" -> TOOL_CALL: analyze_by_filter(timing, BMO)
-- "Tell me about KSS" -> TOOL_CALL: get_stock_details(KSS)
-- "Give me the returns on the tickers that have reported earnings this week" or "returns for stocks that reported so far this week" -> TOOL_CALL: get_returns_this_week(). You MUST include the Returns Summary table from the tool result in your response.
-- "What's the win rate?" -> TOOL_CALL: get_strategy_performance()
-- "Test with 15% stop loss" -> TOOL_CALL: run_backtest(-15, 5)
-- "Find similar stocks to AAPL" -> TOOL_CALL: find_similar_tickers(AAPL, 5)
-- "What stocks are similar to TSLA?" -> TOOL_CALL: find_similar_tickers(TSLA, 5)
-- "Give me a table of the returns" (after finding similar stocks) -> The find_similar_tickers tool already returns a table with stats and returns. Present that table in your response.
-- "Show me a table with returns" -> Use find_similar_tickers if comparing stocks, or present data in table format with stats AND returns
+- "What stop loss does the model recommend?" -> TOOL_CALL: compare_stop_losses()
+- "Backtest a 7% stop" -> TOOL_CALL: run_backtest(-7, 3)
+- "How do beats vs misses do on 3-day returns?" -> TOOL_CALL: get_beat_miss_analysis()
+- "What's the win rate on the filtered universe?" -> TOOL_CALL: get_strategy_performance()
+- "Returns for stocks that reported this week" -> TOOL_CALL: get_returns_this_week() and include the tool’s table
+- "BMO vs AMC on 3D returns" -> TOOL_CALL: analyze_by_filter(timing, BMO) and mention AMC needs a second call or comparison
 
 RESPONSE FORMATTING RULES:
-- Be conversational and explain the data in plain English
-- For historical data, use past tense
-- For live scanner results, explain these are current opportunities
-- Format numbers cleanly with proper spacing
-- DO NOT use asterisks (*) for emphasis in your response - use plain text instead
-- When listing stock details, format clearly: "GE: Price $325.12, Market Cap $342.94B, Earnings Jan 22 BMO"
-- Keep responses concise and readable
+- Be conversational; past tense for history
+- Do not use asterisks for emphasis
+- When listing stocks: include Forward P/E when relevant (e.g. GE: Forward P/E 12, Beta 1.1, …)
 
-CRITICAL TABLE FORMATTING RULES:
-- When a user asks for "table of returns" or "table with returns" or similar table requests:
-  * ALWAYS include BOTH stats (P/E, Beta, Market Cap, Sector) AND returns in the table
-  * Use proper markdown table format with pipes (|) and alignment
-  * Include columns: Ticker, Company, P/E, Beta, Market Cap, Sector, 3D Return (or other return metrics)
-  * Do NOT create a table with only returns - always include the comparison stats
-  * Example format:
-    | Ticker | Company | P/E | Beta | Market Cap | Sector | 3D Return |
-    |--------|---------|-----|------|------------|--------|-----------|
-    | AAPL   | Apple   | 28.5| 1.2  | $3.5T      | Tech   | +5.23%    |
-- The find_similar_tickers tool already returns a properly formatted table with stats and returns
-- If you receive tool results with a table, present that table as-is in your response
-- If user asks for "table of returns" after finding similar stocks, use the table from find_similar_tickers tool results
+TABLE RULES:
+- If the user wants a table of similar stocks with returns, use the find_similar_tickers output as-is (Fwd P/E, 3D Return)
+- For generic return tables, include identifiers and key fundamentals plus 3D Return
 """
 
 
@@ -1773,7 +1899,7 @@ def execute_tool_call(tool_call: str) -> str:
         elif tool_name == 'run_backtest':
             args = [a.strip() for a in args_str.split(',')]
             stop_loss = float(args[0]) if args[0] else -10
-            holding_days = int(args[1]) if len(args) > 1 and args[1] else 5
+            holding_days = int(args[1]) if len(args) > 1 and args[1] else 3
             return run_backtest(stop_loss, holding_days)
         elif tool_name == 'compare_stop_losses':
             return compare_stop_losses()
@@ -1801,65 +1927,99 @@ def execute_tool_call(tool_call: str) -> str:
         return f"Error executing tool: {str(e)}"
 
 
-def chat_with_gemini(user_message: str, chat_history: list, api_key: str, model_name: str) -> tuple[str, str]:
-    """
-    Send a message to Gemini and get a response.
-    Returns tuple of (response_text, model_used)
-    """
-    if not GEMINI_AVAILABLE:
-        return ("Error: google-generativeai package not installed. Run: `pip install google-generativeai`", "none")
-    
-    genai.configure(api_key=api_key)
-    
-    # Build conversation with system prompt
-    messages = [SYSTEM_PROMPT]
-    
+def _build_prompt(user_message: str, chat_history: list) -> str:
+    """Assemble the full prompt from system prompt + history + new message."""
+    parts = [SYSTEM_PROMPT]
     for msg in chat_history:
-        messages.append(f"{msg['role'].upper()}: {msg['content']}")
-    
-    messages.append(f"USER: {user_message}")
-    
-    full_prompt = "\n\n".join(messages)
-    
-    try:
-        model = genai.GenerativeModel(model_name)
-        
-        # First call - let Gemini decide if it needs a tool
-        response = model.generate_content(full_prompt)
-        response_text = response.text
-        
-        # Check if Gemini wants to call a tool
-        if 'TOOL_CALL:' in response_text:
-            # Extract tool call
-            tool_line = [line for line in response_text.split('\n') if 'TOOL_CALL:' in line][0]
-            tool_call = tool_line.split('TOOL_CALL:')[1].strip()
-            
-            # Execute the tool
-            tool_result = execute_tool_call(tool_call)
-            
-            # Send tool result back to Gemini for final response
-            follow_up = f"{full_prompt}\n\nASSISTANT: {response_text}\n\nTOOL_RESULT:\n{tool_result}\n\nNow provide a helpful response to the user based on this data. Be conversational and explain the key insights."
-            
-            final_response = model.generate_content(follow_up)
-            return (final_response.text, model_name)
-        else:
-            return (response_text, model_name)
-            
-    except Exception as e:
-        error_str = str(e).lower()
-        
-        if ('resource exhausted' in error_str or 
-            'quota' in error_str or 
-            '429' in error_str or 
-            'rate limit' in error_str):
-            return (f"Rate limit reached for {model_name}. Try selecting a different model from the dropdown.", model_name)
-        elif ('404' in error_str or 
-              'not found' in error_str or 
-              'not supported' in error_str):
-            return (f"Model '{model_name}' is not available via API. Try a different model.", model_name)
-        else:
-            return (f"Error: {str(e)}", model_name)
+        parts.append(f"{msg['role'].upper()}: {msg['content']}")
+    parts.append(f"USER: {user_message}")
+    return "\n\n".join(parts)
 
+
+def _stream_gemini(full_prompt: str, api_key: str, model_name: str):
+    """Yield text chunks from Gemini (streaming). Falls back to single chunk."""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+    try:
+        for chunk in model.generate_content(full_prompt, stream=True):
+            text = chunk.text
+            if text:
+                yield text
+    except Exception as first_err:
+        if "stream" in str(first_err).lower():
+            resp = model.generate_content(full_prompt)
+            yield resp.text
+        else:
+            raise
+
+
+def _friendly_error(e: Exception, model_name: str) -> str:
+    err = str(e).lower()
+    if any(k in err for k in ("resource exhausted", "quota", "429", "rate limit")):
+        return f"Rate limit hit for {model_name} -- try a different model."
+    if any(k in err for k in ("404", "not found", "not supported")):
+        return f"Model *{model_name}* is not available. Pick another one from the dropdown."
+    return f"Something went wrong: {e}"
+
+
+# ------------------------------------
+# SUGGESTION CHIPS
+# ------------------------------------
+SUGGESTIONS = [
+    ("What stop loss does the model recommend?", "Stop Loss"),
+    ("Show strategy performance", "Performance"),
+    ("How do earnings beats vs misses look?", "Beats vs Misses"),
+    ("What are the risk metrics?", "Risk"),
+    ("What stocks are signaling this week?", "Live Signals"),
+]
+
+# ------------------------------------
+# CSS
+# ------------------------------------
+_CHAT_CSS = """
+<style>
+/* welcome card */
+.chat-welcome {
+    text-align: center;
+    padding: 2.5rem 1rem 1rem;
+}
+.chat-welcome h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #e2e8f0;
+    margin-bottom: 0.25rem;
+}
+.chat-welcome p {
+    color: #94a3b8;
+    font-size: 0.95rem;
+    margin-bottom: 1.5rem;
+}
+
+/* tool status pill */
+.tool-pill {
+    display: inline-block;
+    background: #1e293b;
+    color: #94a3b8;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    padding: 0.3rem 0.85rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.5rem;
+}
+.tool-pill .dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: #22c55e;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+    animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+</style>
+"""
 
 # ------------------------------------
 # STREAMLIT TAB
@@ -1867,119 +2027,162 @@ def chat_with_gemini(user_message: str, chat_history: list, api_key: str, model_
 
 @st.fragment
 def chat_fragment(api_key: str):
-    """Fragment for the chat interface - only this part reruns on interaction."""
-    
-    # Initialize chat history
-    if 'chat_history' not in st.session_state:
+    """Main chat fragment -- reruns only this part on interaction."""
+
+    if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    
-    # Initialize selected model
-    if 'selected_model' not in st.session_state:
+    if "selected_model" not in st.session_state:
         st.session_state.selected_model = list(AVAILABLE_MODELS.keys())[0]
-    
-    # Model selector at top
-    col1, col2 = st.columns([5, 2])
-    with col2:
-        selected = st.selectbox(
-            "Model",
+    if "pending_prompt" not in st.session_state:
+        st.session_state.pending_prompt = None
+
+    st.markdown(_CHAT_CSS, unsafe_allow_html=True)
+
+    # ---- top bar: model selector + clear (compact) ----
+    bar_spacer, bar_model, bar_clear = st.columns([5, 2, 1])
+    with bar_model:
+        st.selectbox(
+            "model",
             options=list(AVAILABLE_MODELS.keys()),
-            format_func=lambda x: AVAILABLE_MODELS[x],
+            format_func=lambda k: AVAILABLE_MODELS[k],
             index=list(AVAILABLE_MODELS.keys()).index(st.session_state.selected_model),
             label_visibility="collapsed",
-            key="model_selector"
+            key="model_sel",
         )
-        st.session_state.selected_model = selected
-    
-    # Input row with clear button
-    input_col, clear_col = st.columns([6, 1])
-    
-    with clear_col:
-        clear_clicked = st.button("Clear", width="stretch", key="clear_chat")
-    
-    with input_col:
-        prompt = st.chat_input("Ask about your strategy...")
-    
-    # Handle clear - wipe history and rerun to refresh the UI
-    if clear_clicked:
-        st.session_state.chat_history = []
-        st.rerun()
-    
-    # Display chat history
+        st.session_state.selected_model = st.session_state.model_sel
+    with bar_clear:
+        if st.button("Clear", use_container_width=True, key="clear_btn"):
+            st.session_state.chat_history = []
+            st.session_state.pending_prompt = None
+            st.rerun(scope="fragment")
+
+    # ---- welcome screen (only when history is empty) ----
+    if not st.session_state.chat_history and not st.session_state.pending_prompt:
+        st.markdown(
+            '<div class="chat-welcome">'
+            "<h2>Earnings Momentum Assistant</h2>"
+            "<p>Ask me anything about your strategy -- returns, stop losses, "
+            "risk, earnings analysis, or live signals.</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        cols = st.columns(len(SUGGESTIONS))
+        for i, (full_q, label) in enumerate(SUGGESTIONS):
+            if cols[i].button(label, key=f"chip_{i}", use_container_width=True):
+                st.session_state.pending_prompt = full_q
+                st.rerun(scope="fragment")
+
+    # ---- replay history ----
     for msg in st.session_state.chat_history:
-        with st.chat_message(msg['role']):
-            st.markdown(msg['content'])
-    
-    # Process new message
-    if prompt:
-        # Display and save user message
-        with st.chat_message('user'):
-            st.markdown(prompt)
-        st.session_state.chat_history.append({'role': 'user', 'content': prompt})
-        
-        # Get AI response
-        response, model_used = chat_with_gemini(
-            prompt, 
-            st.session_state.chat_history[:-1],
-            api_key,
-            st.session_state.selected_model
-        )
-        
-        # Display and save response
-        with st.chat_message('assistant'):
-            st.markdown(response)
-        st.session_state.chat_history.append({'role': 'assistant', 'content': response})
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # ---- chat input (outside columns so it pins to bottom) ----
+    typed = st.chat_input("Ask about your strategy...", key="chat_box")
+
+    # ---- resolve prompt (typed text OR chip click) ----
+    prompt = typed or st.session_state.pending_prompt
+    if st.session_state.pending_prompt and not typed:
+        st.session_state.pending_prompt = None
+    if not prompt:
+        return
+
+    # ---- user bubble ----
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # ---- assistant response (streaming) ----
+    full_prompt = _build_prompt(prompt, st.session_state.chat_history[:-1])
+    model_name = st.session_state.selected_model
+
+    with st.chat_message("assistant"):
+        try:
+            collected = ""
+            placeholder = st.empty()
+            for chunk in _stream_gemini(full_prompt, api_key, model_name):
+                collected += chunk
+                visible = collected.split("TOOL_CALL:")[0].strip()
+                if visible:
+                    placeholder.markdown(visible + " ...")
+                else:
+                    placeholder.markdown("Thinking ...")
+
+            if "TOOL_CALL:" in collected:
+                tool_lines = [l for l in collected.split("\n") if "TOOL_CALL:" in l]
+                tool_call = tool_lines[0].split("TOOL_CALL:")[1].strip()
+                tool_name_display = (
+                    tool_call.split("(")[0].strip().replace("_", " ").title()
+                )
+
+                placeholder.markdown("")
+                st.markdown(
+                    '<span class="tool-pill">'
+                    '<span class="dot"></span>'
+                    f"Running {tool_name_display}..."
+                    "</span>",
+                    unsafe_allow_html=True,
+                )
+                tool_result = execute_tool_call(tool_call)
+
+                follow_up = (
+                    f"{full_prompt}\n\nASSISTANT: {collected}\n\n"
+                    f"TOOL_RESULT:\n{tool_result}\n\n"
+                    "Now provide a helpful, conversational response to the user "
+                    "based on this data. Explain key insights clearly."
+                )
+
+                final_text = ""
+                placeholder2 = st.empty()
+                for chunk in _stream_gemini(follow_up, api_key, model_name):
+                    final_text += chunk
+                    placeholder2.markdown(final_text + " ...")
+                placeholder2.markdown(final_text)
+                collected = final_text
+            else:
+                placeholder.markdown(collected)
+
+            if "TOOL_CALL:" in collected:
+                collected = (
+                    collected.split("TOOL_CALL:")[0].strip()
+                    or "I ran into an issue processing that request. Please try again."
+                )
+
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": collected}
+            )
+
+        except Exception as exc:
+            err_msg = _friendly_error(exc, model_name)
+            st.error(err_msg)
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": err_msg}
+            )
 
 
 def render_ai_assistant_tab():
     """Render the AI Assistant tab."""
-    
-    # Get API key from backend
+
     api_key = get_api_key()
-    
-    # Check dependencies
+
     if not GEMINI_AVAILABLE:
         st.error("Google Generative AI package not installed.")
         st.code("pip install google-generativeai", language="bash")
         return
-    
+
     if not api_key:
         st.error("Gemini API key not configured.")
-        st.markdown("""
-        **For the administrator:** Configure the API key using one of these methods:
-        
-        **Option 1: Environment Variable**
-        ```bash
-        export GEMINI_API_KEY="your-api-key-here"
-        ```
-        
-        **Option 2: Streamlit Secrets** (for Streamlit Cloud)
-        
-        Create `.streamlit/secrets.toml`:
-        ```toml
-        GEMINI_API_KEY = "your-api-key-here"
-        ```
-        
-        **Option 3: .env File**
-        ```
-        GEMINI_API_KEY=your-api-key-here
-        ```
-        
-        Get a free API key at [Google AI Studio](https://aistudio.google.com/apikey)
-        """)
+        st.markdown(
+            "Set `GEMINI_API_KEY` as an environment variable, in "
+            "`.streamlit/secrets.toml`, or in a `.env` file. "
+            "Get a free key at [Google AI Studio](https://aistudio.google.com/apikey)."
+        )
         return
-    
-    # Initialize
-    if 'chat_history' not in st.session_state:
+
+    if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    if 'selected_model' not in st.session_state:
-        st.session_state.selected_model = "gemini-3-flash-preview"  # Default to Gemini 3 Flash
-    
-    # Header
-    st.markdown("**Ask me anything about your Earnings Momentum Strategy**")
-    
-    # Empty state hint
-    if len(st.session_state.chat_history) == 0:
-        st.markdown("_Try: \"What stocks are signaling?\" or \"Show me the strategy performance\" or \"What are the risk metrics?\"_")
-    
-    # Render the chat fragment (fast - no full page rerun)
+    if "selected_model" not in st.session_state:
+        st.session_state.selected_model = "gemini-3-flash-preview"
+
     chat_fragment(api_key)
