@@ -13,6 +13,7 @@ from stop_loss_analysis import render_stop_loss_tab
 from earnings_analysis import render_earnings_analysis_tab
 from ai_assistant import render_ai_assistant_tab
 from trade_dashboard import render_trade_dashboard_tab
+from portfolio_optimizer import render_portfolio_optimizer_tab
 
 # ------------------------------------
 # PAGE SETUP
@@ -50,9 +51,10 @@ except Exception as e:
 # ------------------------------------
 # TABS
 # ------------------------------------
-outer_tab_em, outer_tab_trade = st.tabs([
+outer_tab_em, outer_tab_trade, outer_tab_optimizer = st.tabs([
     "Earnings Momentum",
     "Trade Dashboard",
+    "Portfolio Optimizer",
 ])
 
 with outer_tab_em:
@@ -82,6 +84,9 @@ with outer_tab_em:
 
 with outer_tab_trade:
     render_trade_dashboard_tab()
+
+with outer_tab_optimizer:
+    render_portfolio_optimizer_tab()
 
 # FOOTER
 st.markdown("---")
