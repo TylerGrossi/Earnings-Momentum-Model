@@ -1,0 +1,4 @@
+cache/
+# Event-level intermediates: rebuilt by the scripts
+output/*.parquet
+output/*.log
