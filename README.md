@@ -3,6 +3,14 @@
 
 A quantitative trading strategy that identifies stocks with positive technical momentum ahead of earnings announcements.
 
+## Research in this repo
+
+| Folder | What it is |
+|---|---|
+| [research/](research/README.md) | Out-of-sample audit of this strategy (reports 01–06): sector benchmarks, walk-forward tests, a classifier leakage audit, and a test of the screen on 84,511 S&P 1500 earnings events (2010–2026). |
+| [factor-research-platform/](factor-research-platform/README.md) | Point-in-time S&P 500 equity factor research, validated against Ken French's published factors. |
+| [factor-research-platform/trend-following/](factor-research-platform/trend-following/README.md) | Trend-following (time-series momentum) replication across 20 asset-class ETFs, validated against live managed-futures funds. |
+
 ## Strategy Overview
 
 ### Entry Criteria (All must be met)

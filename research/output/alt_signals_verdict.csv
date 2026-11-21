@@ -1,0 +1,5 @@
+signal,dev_diff_positive,holdout_diff_positive,holdout_p_holm,PASS
+S1 prior beat,False,False,1.0,False
+S2 analyst momentum,False,False,1.0,False
+S3 technical opinion,False,False,1.0,False
+S4 pre-event strength,False,False,1.0,False
